@@ -34,17 +34,21 @@
   let status = $state("Iniciando consulta de observaciones reales…");
   let index = $state(0);
   let referenceIndex = $state(0);
+  let secondaryReferenceIndex = $state(0);
   let playing = $state(false);
   let autoplayAllowed = $state(false);
   let previewSavedAt = $state<string | null>(null);
   const usingPreview = $derived(previewSavedAt !== null);
-  let fps = $state(2);
+  let fps = $state(1);
   let mode = $state<Mode>("image");
+  let secondaryMode = $state<Mode>("overlay");
+  let dualView = $state(false);
   let contrast = $state(5);
   let hideFlags = $state(false);
   let blinkReference = $state(false);
+  let secondaryBlinkReference = $state(false);
   let canvas = $state<HTMLCanvasElement>();
-  let overlayCanvas = $state<HTMLCanvasElement>();
+  let secondaryCanvas = $state<HTMLCanvasElement>();
   let imageViewport = $state<HTMLDivElement>();
   let appElement = $state<HTMLDivElement>();
   let skyContainer = $state<HTMLDivElement>();
@@ -54,10 +58,14 @@
   let panX = $state(0);
   let panY = $state(0);
   let dragging = $state(false);
+  let focusedViewer = $state<1 | 2 | null>(null);
+  let cursorHidden = $state(false);
+  let cursorTimer: ReturnType<typeof setTimeout> | undefined;
   let dragStartX = 0;
   let dragStartY = 0;
   let controller: AbortController | undefined;
   let generation = 0;
+  const availableModes: Mode[] = ["image", "blink", "overlay", "difference"];
   const modeLabels: Record<Mode, string> = {
     image: "Serie temporal",
     blink: "Alternar A/B",
@@ -70,6 +78,12 @@
   );
   const current = $derived(frames[shownIndex]);
   const observation = $derived(observations[shownIndex]);
+  const secondaryShownIndex = $derived(
+    secondaryMode === "blink" && secondaryBlinkReference
+      ? secondaryReferenceIndex
+      : index,
+  );
+  const secondaryCurrent = $derived(frames[secondaryShownIndex]);
   const selectedPreset = $derived(
     presets.find(
       (p) =>
@@ -87,11 +101,15 @@
       observations = preview.observations;
       frames = preview.frames;
       referenceIndex = frames.length > 1 ? 1 : 0;
+      secondaryReferenceIndex = referenceIndex;
       previewSavedAt = preview.savedAt;
       activeQuery = { ...query };
     }
     void explore();
-    return () => controller?.abort();
+    return () => {
+      controller?.abort();
+      clearViewerFocus();
+    };
   });
 
   $effect(() => {
@@ -102,7 +120,10 @@
     if (busy || !playing || frames.length < 2) return;
     const timer = window.setInterval(() => {
       if (mode === "blink") blinkReference = !blinkReference;
-      else index = (index + 1) % frames.length;
+      if (dualView && secondaryMode === "blink")
+        secondaryBlinkReference = !secondaryBlinkReference;
+      if (mode !== "blink" || (dualView && secondaryMode !== "blink"))
+        index = (index + 1) % frames.length;
     }, 1000 / fps);
     return () => window.clearInterval(timer);
   });
@@ -113,8 +134,13 @@
   });
 
   $effect(() => {
-    if (!overlayCanvas || frames.length < 2) return;
-    paintFrame(overlayCanvas, frames[index], frames[referenceIndex], "overlay");
+    if (!dualView || !secondaryCanvas || !secondaryCurrent) return;
+    paintFrame(
+      secondaryCanvas,
+      secondaryCurrent,
+      frames[secondaryReferenceIndex],
+      secondaryMode,
+    );
   });
 
   function paintFrame(
@@ -187,7 +213,41 @@
     dragging = false;
   }
 
+  function clearViewerFocus() {
+    clearTimeout(cursorTimer);
+    cursorTimer = undefined;
+    focusedViewer = null;
+    cursorHidden = false;
+  }
+
+  function wakeCursor(event: PointerEvent) {
+    if (event.pointerType !== "mouse") {
+      clearViewerFocus();
+      return;
+    }
+    clearTimeout(cursorTimer);
+    cursorTimer = undefined;
+    cursorHidden = false;
+    const target = document.elementFromPoint(event.clientX, event.clientY);
+    const viewport = target?.closest(".image-viewport");
+    const viewer = viewport
+      ?.closest(".viewer-pane")
+      ?.getAttribute("data-viewer");
+    focusedViewer = viewer === "1" ? 1 : viewer === "2" ? 2 : null;
+    if (!focusedViewer || dragging) return;
+    cursorTimer = setTimeout(() => {
+      cursorTimer = undefined;
+      if (focusedViewer !== null && !dragging) cursorHidden = true;
+    }, 2000);
+  }
+
   function startPan(event: PointerEvent) {
+    wakeCursor(event);
+    if (
+      event.target instanceof Element &&
+      event.target.closest("button, select, input, label")
+    )
+      return;
     if (busy || !current || zoom <= 1 || event.button !== 0 || !skyContainer)
       return;
     dragging = true;
@@ -197,6 +257,7 @@
   }
 
   function movePan(event: PointerEvent) {
+    wakeCursor(event);
     if (!dragging) return;
     panX = event.clientX - dragStartX;
     panY = event.clientY - dragStartY;
@@ -207,9 +268,15 @@
     dragging = false;
     if (skyContainer?.hasPointerCapture(event.pointerId))
       skyContainer.releasePointerCapture(event.pointerId);
+    wakeCursor(event);
   }
 
   function navigateImage(event: KeyboardEvent) {
+    if (
+      event.target instanceof Element &&
+      event.target.closest("button, select, input, label")
+    )
+      return;
     if (busy || !current) return;
     if (event.key === "+" || event.key === "=") zoomBy(0.5);
     else if (event.key === "-") zoomBy(-0.5);
@@ -239,6 +306,7 @@
   }
 
   async function explore() {
+    clearViewerFocus();
     const validation = validateQuery(query);
     if (validation) {
       errors = [validation];
@@ -253,6 +321,7 @@
     const submitted = { ...query };
     playing = false;
     blinkReference = false;
+    secondaryBlinkReference = false;
     errors = [];
     frameIssues = [];
     warnings = [];
@@ -315,7 +384,10 @@
       previewSavedAt = null;
       index = 0;
       referenceIndex = frames.length > 1 ? 1 : 0;
+      secondaryReferenceIndex = referenceIndex;
       mode = "image";
+      secondaryMode = frames.length > 1 ? "overlay" : "image";
+      secondaryBlinkReference = false;
       resetZoom();
       playing = autoplayAllowed && frames.length >= 2;
       window.history.replaceState(
@@ -352,6 +424,7 @@
     playing = false;
     autoplayAllowed = false;
     blinkReference = false;
+    secondaryBlinkReference = false;
     busy = false;
     status = frames.length
       ? `Consulta cancelada. Se conservaron ${frames.length} imágenes cargadas.`
@@ -372,24 +445,72 @@
     }
   }
 
-  function changeMode(value: string) {
-    mode = value as Mode;
-    blinkReference = false;
+  function changeMode(value: string, viewer: 1 | 2 = 1) {
+    const selectedMode = availableModes.find((option) => option === value);
+    if (!selectedMode) {
+      errors = [
+        ...errors,
+        "El modo de visualización seleccionado no es válido.",
+      ];
+      return;
+    }
+    if (viewer === 1) {
+      mode = selectedMode;
+      blinkReference = false;
+    } else {
+      secondaryMode = selectedMode;
+      secondaryBlinkReference = false;
+    }
+  }
+
+  function setReference(viewer: 1 | 2, value: number) {
+    if (viewer === 1) referenceIndex = value;
+    else secondaryReferenceIndex = value;
   }
 
   function step(delta: number) {
     playing = false;
     autoplayAllowed = false;
     blinkReference = false;
+    secondaryBlinkReference = false;
     index = (index + delta + frames.length) % frames.length;
   }
 </script>
+
+{#snippet referenceControls(viewer: 1 | 2, selected: number)}
+  <div class="reference-controls">
+    <label for={`reference-${viewer}`}>Frame B</label>
+    <select
+      id={`reference-${viewer}`}
+      class="reference-select"
+      aria-label={`Referencia B del visor ${viewer}`}
+      value={selected}
+      disabled={busy || frames.length < 2}
+      onchange={(event) =>
+        setReference(viewer, Number(event.currentTarget.value))}
+    >
+      {#each observations as item, i}
+        <option value={i}>
+          {i + 1} · {item.date.slice(0, 10)}
+          {item.date.slice(11, 19)}
+        </option>
+      {/each}
+    </select>
+    <button
+      aria-label={`Usar frame A como B del visor ${viewer}`}
+      title="Usar frame A como B"
+      disabled={busy || frames.length < 2}
+      onclick={() => setReference(viewer, index)}>A → B</button
+    >
+  </div>
+{/snippet}
 
 <svelte:head>
   <title>SPHEREx Explorer · El cielo, a través del tiempo</title>
 </svelte:head>
 
 <svelte:window
+  onblur={clearViewerFocus}
   onpointerdown={(event) => {
     if (!(event.target instanceof Element)) return;
     if (!event.target.closest(".region-popover")) regionOpen = false;
@@ -409,7 +530,11 @@
   }}
 />
 
-<div class="app" bind:this={appElement}>
+<div
+  class="app"
+  class:viewer-focused={focusedViewer !== null}
+  bind:this={appElement}
+>
   <header class="toolbar" aria-label="Controles del explorador">
     {#if busy}
       <div
@@ -550,63 +675,30 @@
         {/if}
       </form>
 
-      <div class="control-group playback">
-        <div class="transport">
-          <button
-            aria-label="Imagen anterior"
-            title="Imagen anterior"
-            disabled={busy || frames.length < 2}
-            onclick={() => step(-1)}>‹</button
-          >
-          <button
-            class="play"
-            aria-label={playing ? "Pausar" : "Reproducir"}
-            title={playing ? "Pausar" : "Reproducir"}
-            disabled={busy || frames.length < 2}
-            onclick={() => {
-              playing = !playing;
-              autoplayAllowed = playing;
-            }}>{playing ? "Ⅱ" : "▶"}</button
-          >
-          <button
-            aria-label="Imagen siguiente"
-            title="Imagen siguiente"
-            disabled={busy || frames.length < 2}
-            onclick={() => step(1)}>›</button
-          >
-          <span
-            >{busy
-              ? "— / —"
-              : `${frames.length ? index + 1 : 0} / ${frames.length}`}</span
-          >
-        </div>
-        <label class="sr-only" for="fps">Velocidad</label>
-        <select id="fps" bind:value={fps} title="Velocidad de reproducción">
-          <option value={1}>1 fps</option><option value={2}>2 fps</option>
-          <option value={4}>4 fps</option><option value={8}>8 fps</option>
-        </select>
-      </div>
-
       <div class="control-group display-controls">
-        <label class="sr-only" for="mode">Visualización</label>
-        <select
-          id="mode"
-          value={mode}
-          onchange={(event) => changeMode(event.currentTarget.value)}
-          disabled={busy || !frames.length}
-          title="Modo de visualización"
+        <button
+          class="dual-toggle"
+          aria-label={dualView ? "Mostrar un visor" : "Mostrar dos visores"}
+          aria-pressed={dualView}
+          title={dualView ? "Mostrar un visor" : "Mostrar dos visores"}
+          disabled={busy}
+          onclick={() => {
+            clearViewerFocus();
+            dualView = !dualView;
+            secondaryBlinkReference = false;
+          }}
         >
-          <option value="image">Serie temporal</option>
-          <option value="blink" disabled={frames.length < 2}
-            >Alternar A/B</option
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
           >
-          <option value="overlay" disabled={frames.length < 2}
-            >Superponer A/B</option
-          >
-          <option value="difference" disabled={frames.length < 2}
-            >Diferencia A − B</option
-          >
-        </select>
+            <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+            <path d="M12 5v14"></path>
+          </svg>
+        </button>
         <label class="contrast-control" for="contrast">
           Contraste
           <input
@@ -678,19 +770,6 @@
         </summary>
         <div class="popover-content">
           <h2>Comparación y datos</h2>
-          <label for="reference">Referencia B</label>
-          <select
-            id="reference"
-            bind:value={referenceIndex}
-            disabled={busy || frames.length < 2}
-          >
-            {#each observations as item, i}
-              <option value={i}
-                >{i + 1} · {item.date.slice(0, 10)}
-                {item.date.slice(11, 19)}</option
-              >
-            {/each}
-          </select>
           <p class="hint">
             Superposición: A en rojo, B en cian. En modo A/B, pulsa reproducir
             para alternar.
@@ -800,6 +879,8 @@
       aria-label="Visor astronómico. Usa + y − para ampliar, flechas para desplazar y 0 para restablecer."
       tabindex={!busy && current ? 0 : -1}
       onkeydown={navigateImage}
+      onpointerenter={wakeCursor}
+      onpointerleave={clearViewerFocus}
       onpointerdown={startPan}
       onpointermove={movePan}
       onpointerup={endPan}
@@ -865,12 +946,35 @@
           </ol>
         </section>
       {:else if current}
-        <div class="viewer-panes">
+        <div class="viewer-panes" class:dual={dualView}>
           <section
             class="viewer-pane series-pane"
-            aria-label={modeLabels[mode]}
+            class:focused={focusedViewer === 1}
+            class:cursor-hidden={focusedViewer === 1 && cursorHidden}
+            data-viewer="1"
+            aria-label="Visor 1"
           >
-            <h2 class="pane-title">{modeLabels[mode]}</h2>
+            <div class="pane-header">
+              <h2 class="pane-title">Visor 1</h2>
+              <label class="sr-only" for="mode">Visualización</label>
+              <select
+                id="mode"
+                value={mode}
+                title="Modo del visor 1"
+                onchange={(event) => changeMode(event.currentTarget.value)}
+              >
+                {#each availableModes as value}
+                  <option
+                    {value}
+                    disabled={value !== "image" && frames.length < 2}
+                    >{modeLabels[value]}</option
+                  >
+                {/each}
+              </select>
+              {#if mode !== "image"}
+                {@render referenceControls(1, referenceIndex)}
+              {/if}
+            </div>
             <div class="image-viewport" bind:this={imageViewport}>
               <canvas
                 bind:this={canvas}
@@ -901,45 +1005,87 @@
               {/if}
             </div>
           </section>
-          <section
-            class="viewer-pane overlay-pane"
-            aria-label="Superposición A/B"
-          >
-            <h2 class="pane-title">Superponer A/B</h2>
-            <div class="image-viewport">
-              {#if frames.length > 1}
-                <canvas
-                  bind:this={overlayCanvas}
-                  style:transform="translate({panX}px, {panY}px) scale({zoom})"
-                  aria-label="Superposición astronómica: A en rojo, B en cian"
-                ></canvas>
-                <span class="north">N ↑</span><span class="east">E ←</span>
-                <div class="overlay-date">
-                  <span>A · {observations[index]?.date.slice(0, 10)}</span>
-                  <span
-                    >B · {observations[referenceIndex]?.date.slice(0, 10)}</span
-                  >
-                </div>
-                <div class="image-scale">
-                  {activeQuery?.fov}′ × {activeQuery?.fov}′
-                </div>
-                <div class="comparison-note">
-                  A en rojo · B en cian<br />
-                  A: {frames[index]?.wavelength_um?.toFixed(3) ?? "?"} μm · B: {frames[
-                    referenceIndex
-                  ]?.wavelength_um?.toFixed(3) ?? "?"} μm
-                  {#if index === referenceIndex}<br />A y B son la misma
-                    observación.{/if}
-                </div>
-              {:else}
-                <div class="empty-state">
-                  <p>
-                    Se necesitan al menos dos observaciones para superponer A/B.
-                  </p>
-                </div>
-              {/if}
-            </div>
-          </section>
+          {#if dualView}
+            <section
+              class="viewer-pane secondary-pane"
+              class:focused={focusedViewer === 2}
+              class:cursor-hidden={focusedViewer === 2 && cursorHidden}
+              data-viewer="2"
+              aria-label="Visor 2"
+            >
+              <div class="pane-header">
+                <h2 class="pane-title">Visor 2</h2>
+                <label class="sr-only" for="secondary-mode"
+                  >Modo del visor 2</label
+                >
+                <select
+                  id="secondary-mode"
+                  value={secondaryMode}
+                  title="Modo del visor 2"
+                  onchange={(event) => changeMode(event.currentTarget.value, 2)}
+                >
+                  {#each availableModes as value}
+                    <option
+                      {value}
+                      disabled={value !== "image" && frames.length < 2}
+                      >{modeLabels[value]}</option
+                    >
+                  {/each}
+                </select>
+                {#if secondaryMode !== "image"}
+                  {@render referenceControls(2, secondaryReferenceIndex)}
+                {/if}
+              </div>
+              <div class="image-viewport">
+                {#if secondaryCurrent}
+                  <canvas
+                    bind:this={secondaryCanvas}
+                    style:transform="translate({panX}px, {panY}px) scale({zoom})"
+                    aria-label="Recorte astronómico del visor 2: norte arriba, este a la izquierda"
+                  ></canvas>
+                  <span class="north">N ↑</span><span class="east">E ←</span>
+                  {#if secondaryMode === "overlay" || secondaryMode === "difference"}
+                    <div class="overlay-date">
+                      <span>A · {observations[index]?.date.slice(0, 10)}</span>
+                      <span
+                        >B · {observations[secondaryReferenceIndex]?.date.slice(
+                          0,
+                          10,
+                        )}</span
+                      >
+                    </div>
+                  {:else}
+                    <div class="secondary-image-label">
+                      <span
+                        >{observations[secondaryShownIndex]?.date.slice(
+                          0,
+                          10,
+                        )}</span
+                      >
+                      <span class="muted"
+                        >{observations[secondaryShownIndex]?.date.slice(11, 19)} UTC</span
+                      >
+                    </div>
+                  {/if}
+                  <div class="image-scale">
+                    {activeQuery?.fov}′ × {activeQuery?.fov}′
+                  </div>
+                  {#if secondaryMode !== "image" && frames.length > 1}
+                    <div class="comparison-note">
+                      {#if secondaryMode === "overlay"}A en rojo · B en cian<br
+                        />{/if}
+                      A: {frames[index]?.wavelength_um?.toFixed(3) ?? "?"} μm · B:
+                      {frames[secondaryReferenceIndex]?.wavelength_um?.toFixed(
+                        3,
+                      ) ?? "?"} μm
+                      {#if index === secondaryReferenceIndex}<br />A y B son la
+                        misma observación.{/if}
+                    </div>
+                  {/if}
+                {/if}
+              </div>
+            </section>
+          {/if}
         </div>
       {:else}
         <div class="empty-state">
@@ -1003,6 +1149,7 @@
             playing = false;
             autoplayAllowed = false;
             blinkReference = false;
+            secondaryBlinkReference = false;
           }}
         />
         <div class="timeline-dates">
@@ -1023,6 +1170,42 @@
       <span class="timeline-count"
         >{busy ? "En preparación" : `${frames.length} imágenes`}</span
       >
+      <div class="playback" role="group" aria-label="Reproducción de la serie">
+        <span class="frame-position"
+          >{busy
+            ? "— / —"
+            : `${frames.length ? index + 1 : 0} / ${frames.length}`}</span
+        >
+        <div class="transport">
+          <button
+            aria-label="Imagen anterior"
+            title="Imagen anterior"
+            disabled={busy || frames.length < 2}
+            onclick={() => step(-1)}>‹</button
+          >
+          <button
+            class="play"
+            aria-label={playing ? "Pausar" : "Reproducir"}
+            title={playing ? "Pausar" : "Reproducir"}
+            disabled={busy || frames.length < 2}
+            onclick={() => {
+              playing = !playing;
+              autoplayAllowed = playing;
+            }}>{playing ? "Ⅱ" : "▶"}</button
+          >
+          <button
+            aria-label="Imagen siguiente"
+            title="Imagen siguiente"
+            disabled={busy || frames.length < 2}
+            onclick={() => step(1)}>›</button
+          >
+        </div>
+        <label class="sr-only" for="fps">Velocidad</label>
+        <select id="fps" bind:value={fps} title="Velocidad de reproducción">
+          <option value={1}>1 fps</option><option value={2}>2 fps</option>
+          <option value={4}>4 fps</option><option value={8}>8 fps</option>
+        </select>
+      </div>
     </div>
   </main>
 

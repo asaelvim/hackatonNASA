@@ -7,10 +7,10 @@ function encodedPixels(values: number[]): string {
   return bytes.toString("base64");
 }
 
-async function selectReference(page: Page, value: string) {
-  await page.locator("#settings-toggle").click();
-  await page.getByLabel("Referencia B").selectOption(value);
-  await page.keyboard.press("Escape");
+async function selectReference(page: Page, value: string, viewer: 1 | 2 = 1) {
+  await page
+    .getByLabel(`Referencia B del visor ${viewer}`, { exact: true })
+    .selectOption(value);
 }
 
 async function mockArchive(
@@ -75,8 +75,8 @@ test("al entrar carga y reproduce la región sin pulsar explorar", async ({
   await page.getByRole("button", { name: "Pausar", exact: true }).click();
   await page.locator("#timeline").focus();
   await page.keyboard.press("End");
-  await selectReference(page, "0");
   await page.getByLabel("Visualización").selectOption("difference");
+  await selectReference(page, "0");
   const pixel = await page
     .locator(".series-pane canvas")
     .evaluate((element) => {
@@ -114,20 +114,33 @@ test("solicita y prepara las 60 observaciones sin limitar la serie a 12", async 
   await expect(page.locator("#timeline")).toHaveAttribute("max", "59");
   await page.locator("#timeline").focus();
   await page.keyboard.press("End");
-  await expect(page.locator(".transport > span")).toHaveText("60 / 60");
+  await expect(page.locator(".frame-position")).toHaveText("60 / 60");
   await expect(page.locator(".image-label")).toContainText("2084-05-01");
 });
 
-test("muestra serie y superposición juntas con fechas grandes y controles compartidos", async ({
+test("muestra Frame B solo en el encabezado del visor que lo necesita", async ({
   page,
 }, testInfo) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await mockArchive(page, 3);
   await page.goto("/");
   const series = page.locator(".series-pane");
-  const overlay = page.locator(".overlay-pane");
-  await expect(series.getByRole("heading")).toHaveText("Serie temporal");
-  await expect(overlay.getByRole("heading")).toHaveText("Superponer A/B");
+  const overlay = page.locator(".secondary-pane");
+  await expect(page.locator("canvas")).toHaveCount(1);
+  await expect(overlay).toHaveCount(0);
+  await expect(page.getByLabel("Referencia B")).toHaveCount(0);
+  await expect(page.locator("details[open]")).toHaveCount(0);
+  await page.getByRole("button", { name: "Mostrar dos visores" }).click();
+  await expect(
+    page.getByRole("button", { name: "Mostrar un visor" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("Visualización")).toHaveValue("image");
+  await expect(page.getByLabel("Modo del visor 2")).toHaveValue("overlay");
+  await expect(series.locator(".reference-controls")).toHaveCount(0);
+  await expect(
+    overlay.locator(".pane-header .reference-controls"),
+  ).toBeVisible();
+  await expect(page.locator(".toolbar .reference-controls")).toHaveCount(0);
   await expect(page.locator("canvas")).toHaveCount(2);
   await expect(overlay.locator(".overlay-date")).toContainText(
     "A · 2025-05-01",
@@ -150,7 +163,7 @@ test("muestra serie y superposición juntas con fechas grandes y controles compa
       return [...canvas.getContext("2d")!.getImageData(0, 0, 1, 1).data];
     });
   const seriesPixel = await pixels(".series-pane canvas");
-  const overlayPixel = await pixels(".overlay-pane canvas");
+  const overlayPixel = await pixels(".secondary-pane canvas");
   expect(seriesPixel[0]).toBe(seriesPixel[1]);
   expect(seriesPixel[1]).toBe(seriesPixel[2]);
   expect(overlayPixel[0]).toBeLessThan(overlayPixel[1]);
@@ -161,13 +174,65 @@ test("muestra serie y superposición juntas con fechas grandes y controles compa
   await expect(overlay.locator(".overlay-date")).toContainText(
     "A · 2027-05-01",
   );
-  const laterPixel = await pixels(".overlay-pane canvas");
+  const laterPixel = await pixels(".secondary-pane canvas");
   expect(laterPixel[0]).toBeGreaterThan(overlayPixel[0]);
   expect(laterPixel[1]).toBe(overlayPixel[1]);
-  await selectReference(page, "0");
-  const changedReference = await pixels(".overlay-pane canvas");
+  await selectReference(page, "0", 2);
+  const changedReference = await pixels(".secondary-pane canvas");
   expect(changedReference[0]).toBe(laterPixel[0]);
   expect(changedReference[1]).toBeLessThan(laterPixel[1]);
+  await page.getByLabel("Modo del visor 2").selectOption("difference");
+  await expect(page.getByLabel("Visualización")).toHaveValue("image");
+  const differencePixel = await pixels(".secondary-pane canvas");
+  expect(differencePixel[0]).toBeGreaterThan(0);
+  expect(differencePixel[2]).toBe(0);
+  await page.getByLabel("Visualización").selectOption("overlay");
+  await expect(page.getByLabel("Modo del visor 2")).toHaveValue("difference");
+  await expect(
+    series.locator(".pane-header .reference-controls"),
+  ).toBeVisible();
+  await expect(
+    page.getByLabel("Referencia B del visor 1", { exact: true }),
+  ).toHaveValue("1");
+  await expect(
+    page.getByLabel("Referencia B del visor 2", { exact: true }),
+  ).toHaveValue("0");
+  await page
+    .getByRole("button", {
+      name: "Usar frame A como B del visor 1",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByLabel("Referencia B del visor 1", { exact: true }),
+  ).toHaveValue("2");
+  await expect(
+    page.getByLabel("Referencia B del visor 2", { exact: true }),
+  ).toHaveValue("0");
+  expect(await pixels(".secondary-pane canvas")).toEqual(differencePixel);
+  await page.getByLabel("Visualización").selectOption("image");
+  await expect(series.locator(".reference-controls")).toHaveCount(0);
+  await page
+    .getByRole("button", {
+      name: "Usar frame A como B del visor 2",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByLabel("Referencia B del visor 2", { exact: true }),
+  ).toHaveValue("2");
+  await expect(overlay.locator(".comparison-note")).toContainText(
+    "A y B son la misma observación",
+  );
+  await page.getByRole("button", { name: "Mostrar un visor" }).click();
+  await expect(page.locator("canvas")).toHaveCount(1);
+  await expect(page.getByLabel("Referencia B")).toHaveCount(0);
+  await page.getByRole("button", { name: "Mostrar dos visores" }).click();
+  await expect(page.getByLabel("Modo del visor 2")).toHaveValue("difference");
+  await expect(
+    page.getByLabel("Referencia B del visor 2", { exact: true }),
+  ).toHaveValue("2");
+  await selectReference(page, "0", 2);
   await page.getByRole("button", { name: "Acercar", exact: true }).click();
   await expect(series.locator("canvas")).toHaveCSS(
     "transform",
@@ -190,9 +255,146 @@ test("muestra serie y superposición juntas con fechas grandes y controles compa
   );
   await expect(series.locator("canvas")).toBeVisible();
   await expect(overlay.locator("canvas")).toBeVisible();
+  const mobileHeader = await overlay.locator(".pane-header").boundingBox();
+  const mobileReference = await overlay
+    .locator(".reference-select")
+    .boundingBox();
+  expect(mobileReference!.y).toBeGreaterThanOrEqual(mobileHeader!.y);
+  expect(mobileReference!.y + mobileReference!.height).toBeLessThanOrEqual(
+    mobileHeader!.y + mobileHeader!.height,
+  );
+  expect(mobileReference!.x + mobileReference!.width).toBeLessThanOrEqual(320);
   await page.screenshot({
     path: testInfo.outputPath("dual-viewers-mobile.png"),
   });
+  await page.getByRole("button", { name: "Mostrar un visor" }).click();
+  await expect(page.locator("canvas")).toHaveCount(1);
+  const singleBounds = await series.boundingBox();
+  const viewerBounds = await page.locator(".sky-view").boundingBox();
+  expect(singleBounds!.height).toBeGreaterThan(viewerBounds!.height * 0.95);
+});
+
+test("muestra la imagen sin etiquetas encima al pasar el mouse y oculta el cursor al quedar quieto", async ({
+  page,
+}, testInfo) => {
+  await page.clock.install();
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await mockArchive(page, 3);
+  await page.goto("/");
+  await expect(page.getByRole("status")).toContainText(
+    "3 imágenes reales listas",
+  );
+  await page.getByRole("button", { name: "Mostrar dos visores" }).click();
+  const primary = page.locator(".series-pane");
+  const secondary = page.locator(".secondary-pane");
+  const veilOpacity = () =>
+    page
+      .locator(".app")
+      .evaluate((element) => getComputedStyle(element, "::after").opacity);
+  await primary.locator(".image-viewport").hover();
+  await expect(primary.locator(".image-viewport")).toHaveCSS("z-index", "5");
+  await expect(secondary.locator(".image-viewport")).toHaveCSS("z-index", "5");
+  await expect(primary.locator(".image-label")).toBeHidden();
+  await expect(secondary.locator(".overlay-date")).toBeHidden();
+  await expect(primary.locator("canvas")).toBeVisible();
+  await expect.poll(veilOpacity).toBe("1");
+  await page.clock.runFor(1900);
+  await expect(primary.locator("canvas")).not.toHaveCSS("cursor", "none");
+  await page.clock.runFor(100);
+  await expect(primary.locator("canvas")).toHaveCSS("cursor", "none");
+  await primary
+    .locator(".image-viewport")
+    .hover({ position: { x: 30, y: 30 } });
+  await expect(primary.locator("canvas")).not.toHaveCSS("cursor", "none");
+  await secondary.locator(".image-viewport").hover();
+  await expect(secondary.locator(".image-viewport")).toHaveCSS("z-index", "5");
+  await expect(primary.locator(".image-viewport")).toHaveCSS("z-index", "5");
+  await expect(primary.locator(".image-label")).toBeHidden();
+  for (const annotation of [
+    ".north",
+    ".east",
+    ".overlay-date",
+    ".image-scale",
+    ".comparison-note",
+  ])
+    await expect(secondary.locator(annotation)).toBeHidden();
+  await expect(secondary.locator("canvas")).toBeVisible();
+  await page.clock.runFor(2000);
+  await expect(secondary.locator("canvas")).toHaveCSS("cursor", "none");
+  await expect(primary.locator("canvas")).not.toHaveCSS("cursor", "none");
+  await page.screenshot({ path: testInfo.outputPath("focused-viewer.png") });
+  await secondary.locator(".pane-header > select").hover();
+  await expect(primary.locator(".image-label")).toBeVisible();
+  await expect(secondary.locator(".overlay-date")).toBeVisible();
+  await expect(secondary.locator(".image-scale")).toBeVisible();
+  await expect.poll(veilOpacity).toBe("0");
+  await page.clock.runFor(5000);
+  await expect(secondary.locator("canvas")).not.toHaveCSS("cursor", "none");
+  await page.locator(".toolbar").hover({ position: { x: 2, y: 2 } });
+  await expect.poll(veilOpacity).toBe("0");
+  await expect(secondary.locator(".image-viewport")).not.toHaveCSS(
+    "z-index",
+    "5",
+  );
+  await page.getByRole("button", { name: "Acercar", exact: true }).click();
+  await primary.locator(".image-viewport").hover();
+  await page.mouse.down();
+  await page.clock.runFor(3000);
+  await expect(primary.locator("canvas")).not.toHaveCSS("cursor", "none");
+  const bounds = await primary.locator(".image-viewport").boundingBox();
+  await page.mouse.move(
+    bounds!.x + bounds!.width / 2 + 3,
+    bounds!.y + bounds!.height / 2 + 3,
+  );
+  await expect(primary.locator(".image-viewport")).toHaveCSS("z-index", "5");
+  await page.mouse.up();
+  await page.clock.runFor(2000);
+  await expect(primary.locator("canvas")).toHaveCSS("cursor", "none");
+  await primary.locator(".image-viewport").dispatchEvent("pointermove", {
+    pointerType: "touch",
+  });
+  await expect.poll(veilOpacity).toBe("0");
+  await expect(primary.locator("canvas")).not.toHaveCSS("cursor", "none");
+  await primary.locator(".image-viewport").hover();
+  await expect(primary.locator(".image-viewport")).toHaveCSS("z-index", "5");
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await page.clock.runFor(5000);
+  await expect.poll(veilOpacity).toBe("0");
+  await expect(primary.locator("canvas")).not.toHaveCSS("cursor", "none");
+});
+
+test("cada visor alterna A/B sin detener la serie del otro", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await mockArchive(page, 3);
+  await page.goto("/");
+  await expect(page.getByRole("status")).toContainText(
+    "3 imágenes reales listas",
+  );
+  await page.getByRole("button", { name: "Mostrar dos visores" }).click();
+  await page.getByLabel("Visualización").selectOption("blink");
+  await page.getByLabel("Modo del visor 2").selectOption("image");
+  await page.getByLabel("Velocidad").selectOption("1");
+  await page.getByRole("button", { name: "Reproducir", exact: true }).click();
+  await page.clock.runFor(3000);
+  await expect(page.locator(".image-label")).toContainText("2026-05-01");
+  await expect(page.locator(".secondary-image-label")).toContainText(
+    "2025-05-01",
+  );
+  await page.getByLabel("Modo del visor 2").selectOption("blink");
+  await selectReference(page, "2", 2);
+  await page.clock.runFor(1000);
+  await expect(page.locator(".image-label")).toContainText("2025-05-01");
+  await expect(page.locator(".secondary-image-label")).toContainText(
+    "2027-05-01",
+  );
+  await expect(page.locator("#timeline")).toHaveValue("0");
+  await page.getByRole("button", { name: "Mostrar un visor" }).click();
+  await page.clock.runFor(1000);
+  await expect(page.locator(".image-label")).toContainText("2026-05-01");
+  await expect(page.locator("#timeline")).toHaveValue("0");
 });
 
 test("una nueva consulta con una sola imagen sale del modo diferencia", async ({
@@ -204,7 +406,9 @@ test("una nueva consulta con una sola imagen sale del modo diferencia", async ({
     "2 imágenes reales listas",
   );
   await page.getByRole("button", { name: "Pausar", exact: true }).click();
+  await page.getByRole("button", { name: "Mostrar dos visores" }).click();
   await page.getByLabel("Visualización").selectOption("difference");
+  await page.getByLabel("Modo del visor 2").selectOption("difference");
   await page.unroute("**/api/observations?*");
   await mockArchive(page, 1);
   await page.getByRole("button", { name: "Explorar región" }).click();
@@ -212,10 +416,13 @@ test("una nueva consulta con una sola imagen sale del modo diferencia", async ({
     "1 imágenes reales listas",
   );
   await expect(page.getByLabel("Visualización")).toHaveValue("image");
-  await expect(page.locator(".overlay-pane canvas")).toHaveCount(0);
-  await expect(page.locator(".overlay-pane")).toContainText(
-    "Se necesitan al menos dos observaciones",
-  );
+  await expect(page.getByLabel("Modo del visor 2")).toHaveValue("image");
+  await expect(page.locator(".secondary-pane canvas")).toBeVisible();
+  await expect(page.locator("#mode option[value='difference']")).toBeDisabled();
+  await expect(
+    page.locator("#secondary-mode option[value='overlay']"),
+  ).toBeDisabled();
+  await expect(page.getByLabel("Referencia B")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Reproducir", exact: true }),
   ).toBeDisabled();
@@ -270,6 +477,15 @@ test("los controles y desplegables caben en móviles estrechos", async ({
     () => document.documentElement.scrollWidth > window.innerWidth,
   );
   expect(overflows).toBe(false);
+  await expect(page.locator(".timeline-strip .playback")).toBeVisible();
+  await expect(page.locator(".toolbar .playback")).toHaveCount(0);
+  const timelineBounds = await page.locator(".timeline-track").boundingBox();
+  const playbackBounds = await page.locator(".playback").boundingBox();
+  expect(playbackBounds!.y).toBeGreaterThanOrEqual(
+    timelineBounds!.y + timelineBounds!.height,
+  );
+  const playBounds = await page.locator(".play").boundingBox();
+  expect(Math.abs(playBounds!.x + playBounds!.width / 2 - 160)).toBeLessThan(1);
   for (const toggle of ["#region-toggle", "#settings-toggle"]) {
     await page.locator(toggle).click();
     const bounds = await page
@@ -315,6 +531,24 @@ test("el visor es la superficie principal en escritorio", async ({
   expect(layout.top).toBeLessThan(110);
   expect(layout.scrollHeight).toBeLessThanOrEqual(layout.viewportHeight);
   expect(layout.colorScheme).toBe("light");
+  await expect(page.locator(".toolbar .playback")).toHaveCount(0);
+  const playback = page.locator(".timeline-strip .playback");
+  await expect(
+    playback.getByRole("button", { name: "Imagen anterior" }),
+  ).toBeVisible();
+  await expect(
+    playback.getByRole("button", { name: "Imagen siguiente" }),
+  ).toBeVisible();
+  const playbackBounds = await playback.boundingBox();
+  expect(playbackBounds!.y).toBeGreaterThanOrEqual(layout.top + layout.height);
+  const timelineBounds = await page.locator(".timeline-track").boundingBox();
+  expect(playbackBounds!.y).toBeGreaterThanOrEqual(
+    timelineBounds!.y + timelineBounds!.height,
+  );
+  const playBounds = await page.locator(".play").boundingBox();
+  expect(
+    Math.abs(playBounds!.x + playBounds!.width / 2 - layout.viewportWidth / 2),
+  ).toBeLessThan(1);
   await expect(page.locator("details[open]")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("desktop.png") });
 });
@@ -380,7 +614,7 @@ test("muestra la carga y revela la serie ordenada solo cuando termina", async ({
     await expect(page.locator(".loading-state")).toHaveCount(0);
     await expect(page.locator(".series-pane canvas")).toBeVisible();
     await expect(page.locator(".image-label")).toContainText("2025-05-01");
-    await expect(page.locator(".transport > span")).toHaveText("1 / 3");
+    await expect(page.locator(".frame-position")).toHaveText("1 / 3");
     await page.locator("#timeline").focus();
     await page.keyboard.press("End");
     await expect(page.locator(".image-label")).toContainText("2027-05-01");
@@ -554,6 +788,10 @@ test("ampliar permite desplazar la imagen y restablecer la vista", async ({
   ).toHaveText("200%");
   await page.keyboard.press("ArrowRight");
   await expect(canvas).toHaveCSS("transform", "matrix(2, 0, 0, 2, -30, 0)");
+  await page.getByLabel("Visualización").focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByLabel("Visualización")).toHaveValue("blink");
+  await expect(canvas).toHaveCSS("transform", "matrix(2, 0, 0, 2, -30, 0)");
   const bounds = await viewer.boundingBox();
   expect(bounds).not.toBeNull();
   await page.mouse.move(
@@ -613,14 +851,14 @@ test("cancelar descarta la carga parcial y conserva la última serie completa", 
       "Se conservaron 2 imágenes",
     );
     await expect(page.locator(".image-label")).toContainText("2025-05-01");
-    await expect(page.locator(".transport > span")).toHaveText("1 / 2");
+    await expect(page.locator(".frame-position")).toHaveText("1 / 2");
     await expect(page.locator(".loading-state")).toHaveCount(0);
     release();
     await page.getByRole("button", { name: "Explorar región" }).click();
     await expect(page.getByRole("status")).toContainText(
       "3 imágenes reales listas",
     );
-    await expect(page.locator(".transport > span")).toHaveText("1 / 3");
+    await expect(page.locator(".frame-position")).toHaveText("1 / 3");
   } finally {
     release();
   }
@@ -697,7 +935,7 @@ test("un recorte fallido se informa como resultado parcial al terminar", async (
     await expect(page.locator(".frame-issues")).toContainText(
       "No se pudo descargar la respuesta de IRSA.",
     );
-    await expect(page.locator(".transport > span")).toHaveText("1 / 2");
+    await expect(page.locator(".frame-position")).toHaveText("1 / 2");
     await page.locator("#timeline").focus();
     await page.keyboard.press("End");
     await expect(page.locator(".image-label")).toContainText("2027-05-01");
@@ -730,7 +968,7 @@ test("si fallan todos los recortes conserva la serie anterior y sus coordenadas"
     "Se conserva la última serie completa",
   );
   await expect(page.locator(".coordinates")).toHaveText("0.00000°, 0.00000°");
-  await expect(page.locator(".transport > span")).toHaveText("1 / 2");
+  await expect(page.locator(".frame-position")).toHaveText("1 / 2");
   await expect(page.locator(".series-pane canvas")).toBeVisible();
   await expect(page.locator(".loading-state")).toHaveCount(0);
   await expect(page).toHaveURL(/ra=0&dec=0/);

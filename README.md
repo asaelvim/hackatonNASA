@@ -82,10 +82,22 @@ cada exposición por separado.
 
 Puedes reproducir la serie, seleccionar fechas, alternar A/B, superponer A en rojo
 y B en cian o visualizar A − B (positivo en rojo, negativo en azul).
-Por defecto se muestran dos visores: serie temporal a la izquierda y
-superposición A/B a la derecha, con reproducción, contraste, zoom y desplazamiento
-compartidos. En móviles se apilan verticalmente. La referencia B empieza en la
-segunda observación y puede cambiarse en Ajustes.
+Por defecto se muestra un visor. El botón **Dos visores** activa un segundo
+panel; cada visor tiene su propio selector de modo. La reproducción, el contraste,
+el zoom y el desplazamiento son compartidos. En móviles se apilan verticalmente.
+Los controles de reproducción, avance y retroceso están centrados debajo de la
+línea de tiempo, con el contador de frames a la izquierda y la velocidad a la derecha.
+Cada visor tiene su propia referencia B, inicialmente la segunda observación.
+El selector **Frame B** aparece junto al modo de ese visor solamente al alternar
+A/B, superponer o mostrar diferencias. **A → B** usa la observación A actual como
+referencia de ese visor.
+Al pasar el cursor sobre una imagen, las etiquetas de fecha, orientación, escala
+y notas desaparecen de ambos visores. Solo las imágenes conservan su brillo;
+el resto de la interfaz, incluidos los márgenes alrededor de las imágenes,
+se oscurece ligeramente.
+Las etiquetas vuelven al retirar el cursor. Sobre la imagen, el cursor se oculta después
+de dos segundos sin movimiento; vuelve al moverlo y permanece visible sobre
+los controles o mientras arrastras la imagen.
 **Compartir** copia la región con coordenadas, detector y campo de visión:
 
 ```text
