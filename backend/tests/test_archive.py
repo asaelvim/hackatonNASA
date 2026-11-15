@@ -11,6 +11,7 @@ from astropy.wcs import WCS
 from fastapi.testclient import TestClient
 
 from app import archive
+from app.cache import frame_cache
 from app.main import app
 
 URL = (
@@ -18,6 +19,16 @@ URL = (
     "2025W33_2C/l2b-v27-2026-228/1/"
     "level2_2025W33_2C_0321_1D1_spx_l2b-v27-2026-228.fits"
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_resources(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPHEREX_CACHE_DIR", str(tmp_path))
+    frame_cache.cache_clear()
+    archive.close_client()
+    yield
+    archive.close_client()
+    frame_cache.cache_clear()
 
 
 def synthetic_fits(shift=0, all_invalid=False):
@@ -104,6 +115,31 @@ def test_search_samples_full_time_range_and_filters_detector(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "limit,truncated,expected_count",
+    [(None, False, 60), (None, True, 60), (12, False, 12)],
+)
+def test_api_returns_all_observations_unless_sampling_is_requested(
+    monkeypatch, limit, truncated, expected_count
+):
+    rows = [{"id": str(i), "mjd": float(i), "detector": 1} for i in range(60)]
+    monkeypatch.setattr(
+        archive, "query_collection", lambda *args: (list(reversed(rows)), truncated)
+    )
+    client = TestClient(app)
+    query = "/api/observations?ra=20&dec=30"
+    if limit is not None:
+        query += f"&limit={limit}"
+    response = client.get(query)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["total"] == 60
+    assert len(result["observations"]) == expected_count
+    assert result["observations"][0]["mjd"] == 0
+    assert result["observations"][-1]["mjd"] == 59
+    assert len(result["warnings"]) == (2 if truncated else int(limit is not None))
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "http://127.0.0.1/secret.fits",
@@ -153,19 +189,25 @@ def test_reprocessed_retry_products_are_allowed():
 def test_download_retries_transient_errors_but_not_invalid_requests(monkeypatch):
     client_class = httpx.Client
     calls = []
+    clients = []
 
     def handler(request):
         calls.append(request)
         return httpx.Response(503 if len(calls) == 1 else 200, content=b"FITS")
 
-    monkeypatch.setattr(
-        archive.httpx,
-        "Client",
-        lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs),
-    )
+    def create_client(**kwargs):
+        client = client_class(transport=httpx.MockTransport(handler), **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(archive.httpx, "Client", create_client)
     monkeypatch.setattr(archive.time, "sleep", lambda _: None)
     assert archive.download(URL, {}, 100) == b"FITS"
     assert len(calls) == 2
+    assert archive.download(URL, {}, 100) == b"FITS"
+    assert len(clients) == 1
+    archive.close_client()
+    assert clients[0].is_closed
 
     def invalid(request):
         calls.append(request)
@@ -180,3 +222,53 @@ def test_download_retries_transient_errors_but_not_invalid_requests(monkeypatch)
     with pytest.raises(httpx.HTTPStatusError):
         archive.download(URL, {}, 100)
     assert len(calls) == 1
+
+
+def test_frame_cache_survives_restart_and_distinguishes_cutouts(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        archive, "download", lambda *args: calls.append(args) or b"FITS"
+    )
+    monkeypatch.setattr(
+        archive, "prepare_frame", lambda content, ra, dec, fov: {"fov": fov}
+    )
+    for fov in range(1, 25):
+        archive.frame(URL, 20, 30, fov)
+    assert len(calls) == 24
+    frame_cache.cache_clear()
+    assert archive.frame(URL, 20.0, 30.0, 1.0) == {"fov": 1}
+    assert len(calls) == 24
+    archive.frame(URL, 21, 30, 1)
+    archive.frame(URL, 20, 31, 1)
+    archive.frame(URL.replace("l2b-v", "l2b_retry-v"), 20, 30, 1)
+    assert len(calls) == 27
+
+
+def test_failed_download_is_not_cached(monkeypatch):
+    calls = []
+
+    def download(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("Timed out")
+        return b"FITS"
+
+    monkeypatch.setattr(archive, "download", download)
+    monkeypatch.setattr(archive, "prepare_frame", lambda *args: {"pixels": "real"})
+    with pytest.raises(httpx.ReadTimeout):
+        archive.frame(URL, 20, 30, 2)
+    assert archive.frame(URL, 20, 30, 2) == {"pixels": "real"}
+    assert archive.frame(URL, 20, 30, 2) == {"pixels": "real"}
+    assert len(calls) == 2
+
+
+def test_unavailable_cache_logs_warning_and_still_loads(monkeypatch, caplog):
+    def unavailable():
+        raise OSError("Cache directory is read-only")
+
+    monkeypatch.setattr(archive, "frame_cache", unavailable)
+    monkeypatch.setattr(archive, "download", lambda *args: b"FITS")
+    monkeypatch.setattr(archive, "prepare_frame", lambda *args: {"pixels": "real"})
+    assert archive.frame(URL, 20, 30, 2) == {"pixels": "real"}
+    assert "No se pudo leer la caché" in caplog.text
+    assert "No se pudo guardar el recorte" in caplog.text

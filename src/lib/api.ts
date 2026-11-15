@@ -55,7 +55,6 @@ export async function search(
     ra: String(query.ra),
     dec: String(query.dec),
     detector: String(query.detector),
-    limit: "12",
   });
   return json(await fetch(`/api/observations?${params}`, { signal }));
 }

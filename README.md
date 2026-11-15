@@ -45,11 +45,12 @@ y una política de caché para las descargas.
 
 ## Explorar
 
-Al abrir la región inicial de Barnard se muestran dos observaciones reales
-guardadas con la aplicación, sin esperar ninguna respuesta de IRSA. Se identifican
-como **vista previa guardada**, con las fechas originales y los enlaces FITS de
-procedencia. En paralelo se consulta el archivo; la primera imagen nueva reemplaza
-la vista previa y las demás aparecen conforme están listas.
+Al abrir la región inicial de Barnard se consulta el archivo y se muestra una
+animación de espera con el progreso de preparación. Las imágenes disponibles
+aparecen juntas, ordenadas por fecha, cuando termina la carga; no se presentan
+resultados intermedios. Si la consulta falla, hay dos observaciones reales
+guardadas como respaldo, identificadas como **vista previa guardada**, con sus
+fechas originales y los enlaces FITS de procedencia.
 
 Para otras coordenadas, campos de visión o detectores, la primera imagen depende
 de IRSA: no se muestra la vista de Barnard como si perteneciera a otra región.
@@ -65,10 +66,13 @@ margen al movimiento respecto de las coordenadas de referencia.
 
 Pulsa **Explorar región**. La API consulta las colecciones Wide Survey
 `spherex_dr1` y `spherex_qr3`, conserva las fechas de las exposiciones, selecciona
-el detector y descarga hasta 12 recortes distribuidos sobre el intervalo
-encontrado. No utiliza el cubo combinado del cielo para simular épocas.
+el detector y descarga los recortes de todas las observaciones encontradas,
+sin muestrear la serie ni limitarla a 12 imágenes. La primera carga puede tardar
+más en regiones con muchas observaciones; las siguientes reutilizan la caché.
+No utiliza el cubo combinado del cielo para simular épocas.
 Las consultas truncadas y las imágenes que no pudieron cargarse se notifican.
-Puedes cancelar la descarga sin perder las imágenes ya cargadas.
+Puedes cancelar la descarga sin perder la última serie disponible; los resultados
+intermedios de la nueva consulta se descartan.
 
 Las imágenes se reproyectan con WCS e interpolación bilineal a una cuadrícula TAN
 común, con norte arriba, este a la izquierda y escala próxima a 6.2″/píxel. Los
@@ -78,6 +82,10 @@ cada exposición por separado.
 
 Puedes reproducir la serie, seleccionar fechas, alternar A/B, superponer A en rojo
 y B en cian o visualizar A − B (positivo en rojo, negativo en azul).
+Por defecto se muestran dos visores: serie temporal a la izquierda y
+superposición A/B a la derecha, con reproducción, contraste, zoom y desplazamiento
+compartidos. En móviles se apilan verticalmente. La referencia B empieza en la
+segunda observación y puede cambiarse en Ajustes.
 **Compartir** copia la región con coordenadas, detector y campo de visión:
 
 ```text
@@ -108,7 +116,15 @@ observaciones, contraste o modo de comparación.
   ni exportación de vídeo. Los cinco nombres disponibles son ejemplos precargados.
 
 IRSA se consulta de nuevo en cada búsqueda, sin fijar una lista local de imágenes.
-Los recortes preparados tienen una caché de hasta 16 entradas por proceso.
+Los recortes preparados se guardan en una caché persistente SQLite de hasta
+128 MiB de datos, compartida entre reinicios y procesos locales. Se descartan
+primero los recortes menos usados recientemente. Por defecto está en
+`$XDG_CACHE_HOME/spherex-explorer` o `~/.cache/spherex-explorer`; puedes cambiar
+el directorio con `SPHEREX_CACHE_DIR`. La clave incluye la observación, las
+coordenadas, el campo de visión y la versión de procesamiento; cambia esta
+versión si modificas la preparación científica de los recortes.
+Las descargas reutilizan conexiones HTTP y el visor prepara hasta dos
+observaciones a la vez. La consulta del catálogo sigue dependiendo de IRSA.
 La vista previa local es una muestra de dos exposiciones, no un archivo completo
 ni una garantía de descubrimiento. Para regenerarla con datos del archivo y
 volver a compilar el frontend:

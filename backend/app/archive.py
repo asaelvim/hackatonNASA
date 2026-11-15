@@ -1,12 +1,15 @@
+import atexit
 import base64
 import hashlib
 import io
+import json
 import logging
 import math
 import re
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from threading import Lock
 from xml.etree import ElementTree
 
 import httpx
@@ -18,10 +21,14 @@ from astropy.time import Time
 from astropy.wcs import WCS
 from scipy.ndimage import map_coordinates
 
+from app.cache import frame_cache
+
 SIA_URL = "https://irsa.ipac.caltech.edu/SIA"
 COLLECTIONS = ("spherex_dr1", "spherex_qr3")
 MAX_RECORDS = 20000
 logger = logging.getLogger("spherex")
+_client: httpx.Client | None = None
+_client_lock = Lock()
 SOURCE_PATTERN = re.compile(
     r"https://irsa\.ipac\.caltech\.edu/ibe/data/spherex/(dr1|qr3)/level2/"
     r"\d{4}W\d{2}_[A-Z0-9]+/l2b(?:_retry)?-v\d+-\d{4}-\d{3}/[1-6]/"
@@ -38,20 +45,40 @@ def valid_source(url: str) -> bool:
     return SOURCE_PATTERN.fullmatch(url) is not None
 
 
+def http_client() -> httpx.Client:
+    global _client
+    with _client_lock:
+        if _client is None:
+            _client = httpx.Client(
+                timeout=120,
+                follow_redirects=False,
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
+            )
+        return _client
+
+
+def close_client():
+    global _client
+    with _client_lock:
+        if _client is not None:
+            _client.close()
+            _client = None
+
+
+atexit.register(close_client)
+
+
 def download(url: str, params: dict, max_bytes: int) -> bytes:
     for attempt in range(3):
         try:
-            with httpx.Client(timeout=120, follow_redirects=False) as client:
-                with client.stream("GET", url, params=params) as response:
-                    response.raise_for_status()
-                    content = bytearray()
-                    for chunk in response.iter_bytes():
-                        content.extend(chunk)
-                        if len(content) > max_bytes:
-                            raise ArchiveError(
-                                "IRSA devolvió un archivo demasiado grande."
-                            )
-                    return bytes(content)
+            with http_client().stream("GET", url, params=params) as response:
+                response.raise_for_status()
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    content.extend(chunk)
+                    if len(content) > max_bytes:
+                        raise ArchiveError("IRSA devolvió un archivo demasiado grande.")
+                return bytes(content)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in (429, 502, 503, 504) or attempt == 2:
                 raise
@@ -103,7 +130,7 @@ def query_collection(collection: str, ra: float, dec: float) -> tuple[list, bool
     return observations, truncated
 
 
-def search(ra: float, dec: float, detector: int, limit: int) -> dict:
+def search(ra: float, dec: float, detector: int, limit: int | None = None) -> dict:
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(
             pool.map(
@@ -123,7 +150,7 @@ def search(ra: float, dec: float, detector: int, limit: int) -> dict:
                 observations[row["id"]] = row
     ordered = sorted(observations.values(), key=lambda row: row["mjd"])
     count = len(ordered)
-    if count > limit:
+    if limit is not None and count > limit:
         indices = np.linspace(0, count - 1, limit, dtype=int)
         ordered = [ordered[index] for index in indices]
         warnings.append(
@@ -190,14 +217,27 @@ def prepare_frame(content: bytes, ra: float, dec: float, fov: float) -> dict:
         }
 
 
-@lru_cache(maxsize=16)
 def frame(source_url: str, ra: float, dec: float, fov: float) -> dict:
     if not valid_source(source_url):
         raise ArchiveError("URL de observación no permitida.")
+    key = hashlib.sha256(
+        json.dumps([1, source_url, float(ra), float(dec), float(fov)]).encode()
+    ).hexdigest()
+    try:
+        cached = frame_cache().get(key)
+        if cached is not None:
+            return cached
+    except (OSError, sqlite3.Error, ValueError):
+        logger.warning("No se pudo leer la caché; se consultará IRSA", exc_info=True)
     # A rotated output square needs a larger input cutout, plus an edge margin.
     content = download(
         source_url,
         {"center": f"{ra},{dec}", "size": fov / 60 * math.sqrt(2) + 0.01},
         32 * 1024 * 1024,
     )
-    return prepare_frame(content, ra, dec, fov)
+    prepared = prepare_frame(content, ra, dec, fov)
+    try:
+        frame_cache().put(key, prepared)
+    except (OSError, sqlite3.Error, ValueError):
+        logger.warning("No se pudo guardar el recorte en caché", exc_info=True)
+    return prepared

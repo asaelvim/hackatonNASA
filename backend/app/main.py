@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from xml.etree.ElementTree import ParseError
 
@@ -13,7 +14,17 @@ from pydantic import BaseModel, Field, field_validator
 from app import archive
 
 logger = logging.getLogger("spherex")
-app = FastAPI(title="SPHEREx Explorer", version="0.1.0")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        yield
+    finally:
+        archive.close_client()
+
+
+app = FastAPI(title="SPHEREx Explorer", version="0.1.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
@@ -63,7 +74,7 @@ def observations(
     ra: float = Query(ge=0, lt=360, allow_inf_nan=False),
     dec: float = Query(ge=-90, le=90, allow_inf_nan=False),
     detector: int = Query(default=1, ge=1, le=6),
-    limit: int = Query(default=12, ge=2, le=24),
+    limit: int | None = Query(default=None, ge=2, le=24),
 ):
     return upstream(archive.search, ra, dec, detector, limit)
 
