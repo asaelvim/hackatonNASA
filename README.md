@@ -1,5 +1,8 @@
 # SPHEREx Explorer
 
+Desarrollado por el **equipo Otarios**, del **Instituto Tecnológico de La Paz**,
+para NASA Space Apps Challenge.
+
 Visor público de observaciones reales de SPHEREx: **Svelte + TypeScript + Vite**
 para los controles, **Canvas** para las imágenes y **FastAPI + Astropy + NumPy +
 SciPy** para consultar NASA/IPAC IRSA y alinear recortes FITS.

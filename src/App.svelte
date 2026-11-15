@@ -541,8 +541,9 @@
   </main>
 
   <footer>
-    <span>SPHEREx Explorer · NASA Space Apps Challenge</span><span
-      >Datos: NASA / JPL-Caltech / IPAC · Proyecto independiente</span
-    >
+    <span
+      >SPHEREx Explorer · NASA Space Apps Challenge<br />
+      Equipo Otarios · Instituto Tecnológico de La Paz</span
+    ><span>Datos: NASA / JPL-Caltech / IPAC · Proyecto independiente</span>
   </footer>
 </div>
