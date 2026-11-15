@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from app import archive
+from app import archive, candidates
 
 logger = logging.getLogger("spherex")
 app = FastAPI(title="SPHEREx Explorer", version="0.1.0")
@@ -29,6 +29,31 @@ class FrameRequest(BaseModel):
         if not archive.valid_source(value):
             raise ValueError("La URL debe ser un FITS Level 2 de IRSA DR1 o QR3.")
         return value
+
+
+class CandidateObservation(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    source_url: str = Field(max_length=512)
+    obs_id: str = Field(default="", max_length=128)
+    mjd: float = Field(allow_inf_nan=False)
+    date: str = Field(min_length=10, max_length=40)
+
+    @field_validator("source_url")
+    @classmethod
+    def validate_source(cls, value: str) -> str:
+        if not archive.valid_source(value):
+            raise ValueError("La URL debe ser un FITS Level 2 de IRSA DR1 o QR3.")
+        return value
+
+
+class CandidateRequest(BaseModel):
+    ra: float = Field(ge=0, lt=360, allow_inf_nan=False)
+    dec: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    fov: float = Field(ge=1, le=30, allow_inf_nan=False)
+    observations: list[CandidateObservation] = Field(
+        min_length=3,
+        max_length=24,
+    )
 
 
 @app.exception_handler(archive.ArchiveError)
@@ -71,6 +96,18 @@ def observations(
 @app.post("/api/frame")
 def get_frame(body: FrameRequest):
     return upstream(archive.frame, body.source_url, body.ra, body.dec, body.fov)
+
+
+@app.post("/api/candidates")
+def get_candidates(body: CandidateRequest):
+    observations = [item.model_dump() for item in body.observations]
+    return upstream(
+        candidates.analyze,
+        observations,
+        body.ra,
+        body.dec,
+        body.fov,
+    )
 
 
 dist = Path(__file__).resolve().parents[2] / "dist"

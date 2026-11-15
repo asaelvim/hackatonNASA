@@ -2025,3 +2025,242 @@ footer {
 .viewer-tools .pan-hint {
   display: none !important;
 }
+
+/* --- Candidate discovery module --- */
+
+.candidate-tool {
+  margin-top: 14px;
+  padding: 13px;
+  border: 1px solid #263852;
+  border-radius: 10px;
+  background: #0a1321;
+}
+
+.candidate-heading,
+.candidate-detail-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.candidate-heading strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 14px;
+}
+
+.candidate-run {
+  flex: 0 0 auto;
+  padding: 7px 9px;
+  border-color: rgba(103, 232, 249, 0.28);
+  background: rgba(103, 232, 249, 0.06);
+  font-size: 10px;
+}
+
+.candidate-intro,
+.candidate-caveat {
+  margin: 9px 0 0;
+  color: #8f9caf;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.candidate-loading,
+.candidate-error,
+.candidate-warning,
+.candidate-empty {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.candidate-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #a9c7d8;
+  border: 1px solid #263852;
+  background: #07111e;
+}
+
+.candidate-error {
+  color: #f5bcc4;
+  border: 1px solid rgba(251, 113, 133, 0.26);
+  background: rgba(251, 113, 133, 0.05);
+}
+
+.candidate-error strong,
+.candidate-error span {
+  display: block;
+}
+
+.candidate-warning,
+.candidate-empty {
+  color: #d9c493;
+  border: 1px solid rgba(245, 185, 66, 0.22);
+  background: rgba(245, 185, 66, 0.045);
+}
+
+.candidate-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.candidate-diagnostics span {
+  padding: 7px 5px;
+  text-align: center;
+  color: #7f8ea3;
+  border: 1px solid #1d2d42;
+  border-radius: 7px;
+  font-size: 8px;
+}
+
+.candidate-diagnostics strong {
+  display: block;
+  color: #dce8f5;
+  font-size: 12px;
+}
+
+.candidate-list {
+  display: grid;
+  gap: 5px;
+  max-height: 300px;
+  margin-top: 10px;
+  overflow: auto;
+}
+
+.candidate-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  text-align: left;
+  border-radius: 8px;
+  background: #07111e;
+}
+
+.candidate-row.active {
+  border-color: rgba(103, 232, 249, 0.4);
+  background: rgba(103, 232, 249, 0.07);
+}
+
+.candidate-rank {
+  color: #6f8198;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.candidate-copy {
+  min-width: 0;
+}
+
+.candidate-copy strong,
+.candidate-copy small {
+  display: block;
+}
+
+.candidate-copy strong {
+  color: #e3edf8;
+  font-size: 10px;
+}
+
+.candidate-copy small {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: #8494a9;
+  font-size: 8px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-score {
+  color: #77e4c5;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.candidate-details {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #2a405d;
+  border-radius: 8px;
+  background: #081522;
+}
+
+.candidate-detail-heading span,
+.candidate-detail-heading strong {
+  display: block;
+}
+
+.candidate-detail-heading > div > span {
+  color: #75869c;
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.candidate-detail-heading > div > strong {
+  margin-top: 2px;
+  font-size: 14px;
+}
+
+.confidence {
+  padding: 4px 6px;
+  border: 1px solid #31435a;
+  border-radius: 999px;
+  color: #a5b0bf;
+  font-size: 8px;
+}
+
+.confidence.high {
+  color: #7ce4c5;
+  border-color: rgba(110, 231, 183, 0.3);
+}
+
+.confidence.medium {
+  color: #e7c77c;
+  border-color: rgba(245, 185, 66, 0.3);
+}
+
+.candidate-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.candidate-metrics > div {
+  padding: 7px;
+  border: 1px solid #1e3046;
+  border-radius: 7px;
+  background: #07101d;
+}
+
+.candidate-metrics span,
+.candidate-metrics strong {
+  display: block;
+}
+
+.candidate-metrics span {
+  color: #718299;
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.candidate-metrics strong {
+  margin-top: 2px;
+  color: #dfe9f5;
+  font-family: var(--mono);
+  font-size: 10px;
+}

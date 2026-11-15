@@ -37,6 +37,78 @@ export type EncodedFrame = Omit<Frame, "pixels" | "flags"> & {
   flags: string;
 };
 
+export interface CandidateTimelinePoint {
+  observation_id: string;
+  date: string;
+  mjd: number;
+  frame_index: number;
+  x: number;
+  y: number;
+  detected: boolean;
+}
+
+export interface CandidatePoint {
+  observation_id: string;
+  obs_id: string;
+  date: string;
+  mjd: number;
+  frame_index: number;
+  x: number;
+  y: number;
+  ra: number;
+  dec: number;
+  flux_proxy: number;
+  snr_proxy: number;
+  bad_fraction: number;
+  peak_sigma: number;
+  wavelength_um: number | null;
+  bandwidth_um: number | null;
+}
+
+export interface Candidate {
+  id: string;
+  score: number;
+  confidence: "high" | "medium" | "low";
+  kind: "motion" | "variability" | "motion+variability";
+  reason: string;
+  epochs: number;
+  baseline_days: number;
+  coverage_fraction: number;
+  continuity: number;
+  max_gap_epochs: number;
+  motion_arcsec: number;
+  motion_arcsec_per_year: number;
+  motion_linearity: number;
+  motion_significance_proxy: number;
+  flux_variability: number;
+  variability_epochs: number;
+  median_snr_proxy: number;
+  mean_bad_fraction: number;
+  points: CandidatePoint[];
+  timeline: CandidateTimelinePoint[];
+}
+
+export interface CandidateResult {
+  candidates: Candidate[];
+  diagnostics: {
+    frames_analyzed: number;
+    frame_failures: number;
+    detections: number;
+    tracks_considered: number;
+    candidate_count: number;
+  };
+  warnings: string[];
+  method: {
+    background: string;
+    threshold_sigma: number;
+    minimum_motion_epochs: number;
+    minimum_variability_epochs: number;
+    maximum_gap_epochs: number;
+    assignment: string;
+    note: string;
+  };
+}
+
 async function json<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const body = await response.json();
@@ -102,4 +174,30 @@ export async function loadFrame(
     }),
   );
   return decodeFrame(result);
+}
+
+export async function analyzeCandidates(
+  query: Query,
+  observations: Observation[],
+  signal: AbortSignal,
+): Promise<CandidateResult> {
+  return json<CandidateResult>(
+    await fetch("/api/candidates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ra: query.ra,
+        dec: query.dec,
+        fov: query.fov,
+        observations: observations.map((observation) => ({
+          id: observation.id,
+          source_url: observation.source_url,
+          obs_id: observation.obs_id,
+          mjd: observation.mjd,
+          date: observation.date,
+        })),
+      }),
+      signal,
+    }),
+  );
 }

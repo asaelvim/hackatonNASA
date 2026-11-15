@@ -28,11 +28,11 @@ logger = logging.getLogger("spherex")
 # are intentionally not part of this bad-pixel mask because the official
 # mosaic pipeline propagates them rather than masking them as generic bad data.
 BAD_PIXEL_BITS = (
-    0,   # TRANSIENT
-    2,   # SUR_ERROR
-    6,   # NONFUNC
-    7,   # DICHROIC
-    9,   # MISSING_DATA
+    0,  # TRANSIENT
+    2,  # SUR_ERROR
+    6,  # NONFUNC
+    7,  # DICHROIC
+    9,  # MISSING_DATA
     10,  # HOT
     11,  # COLD
     14,  # PHANMISS
@@ -155,7 +155,8 @@ def search(ra: float, dec: float, detector: int, limit: int) -> dict:
                 ElementTree.ParseError,
             ) as exc:
                 logger.warning(
-                    "No se pudo consultar %s; se continuará con las otras colecciones: %s",
+                    "No se pudo consultar %s; se continuará con las otras "
+                    "colecciones: %s",
                     collection,
                     exc,
                 )

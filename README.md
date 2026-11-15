@@ -44,6 +44,11 @@ Incluye:
 - Conservación de la última vista válida cuando una nueva consulta falla.
 - Compartir consultas mediante URL.
 - Enlace directo al FITS original de IRSA.
+- Detección automática de fuentes compactas.
+- Asociación de detecciones entre épocas.
+- Ranking de candidatos por movimiento aparente y variabilidad.
+- Candidate Score heurístico para priorizar revisión humana.
+- Marcador de candidato dentro del visor temporal.
 
 ---
 
@@ -374,6 +379,47 @@ npm run build
 
 La vista previa debe regenerarse cuando cambie el procesamiento científico del
 backend.
+
+---
+
+## Sistema de candidatos
+
+El análisis automático reutiliza las mismas imágenes cargadas en el visor.
+
+```text
+frames IMAGE − ZODI alineados
+        ↓
+sigma clipping del fondo
+        ↓
+detección de fuentes compactas
+        ↓
+asociación espacial entre épocas
+        ↓
+ajuste lineal de trayectoria
+        ↓
+variabilidad en grupos espectralmente compatibles
+        ↓
+Candidate Score
+        ↓
+Candidate Queue
+        ↓
+revisión humana
+```
+
+El sistema reporta movimiento aparente, desplazamiento, linealidad, variabilidad,
+número de épocas y un score de prioridad.
+
+La asociación temporal usa emparejamiento global uno-a-uno, limita saltos entre
+épocas y exige continuidad suficiente antes de promover un track. Cuando falta
+una detección intermedia, el visor puede mostrar una posición predicha con marcador
+cian punteado; no se confunde con una detección real.
+
+`Candidate Score`, `SNR proxy` y `motion significance proxy` son métricas
+heurísticas del prototipo. No son incertidumbres o significancias estadísticas
+formales y no confirman un descubrimiento.
+
+La siguiente etapa científica es incorporar catálogos externos, errores formales,
+PSF/ePSF y validación cruzada de candidatos.
 
 ---
 

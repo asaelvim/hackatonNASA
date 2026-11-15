@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { search, loadFrame } from "./lib/api";
-  import type { Frame, Observation } from "./lib/api";
+  import { analyzeCandidates, search, loadFrame } from "./lib/api";
+  import type {
+    Candidate,
+    CandidateResult,
+    Frame,
+    Observation,
+  } from "./lib/api";
   import {
     defaults,
     detectors,
@@ -25,6 +30,10 @@
   let warnings = $state<string[]>([]);
   let errors = $state<string[]>([]);
   let frameIssues = $state<string[]>([]);
+  let candidateResult = $state<CandidateResult | null>(null);
+  let candidateBusy = $state(false);
+  let candidateError = $state<string | null>(null);
+  let selectedCandidateId = $state<string | null>(null);
   let busy = $state(false);
   let progress = $state(0);
   let progressPhase = $state<
@@ -53,6 +62,7 @@
   let dragStartX = 0;
   let dragStartY = 0;
   let controller: AbortController | undefined;
+  let candidateController: AbortController | undefined;
   let generation = 0;
   const range = $derived(sharedRange(frames, hideFlags));
   const shownIndex = $derived(
@@ -96,6 +106,16 @@
         activeQuery.fov !== query.fov ||
         activeQuery.detector !== query.detector),
   );
+  const selectedCandidate = $derived(
+    candidateResult?.candidates.find(
+      (candidate) => candidate.id === selectedCandidateId,
+    ) ?? null,
+  );
+  const currentCandidateMarker = $derived(
+    selectedCandidate?.timeline.find(
+      (point) => point.observation_id === observation?.id,
+    ) ?? null,
+  );
 
   onMount(() => {
     query = readQuery(window.location.search);
@@ -111,7 +131,10 @@
       playing = autoplayAllowed;
     }
     void explore();
-    return () => controller?.abort();
+    return () => {
+      controller?.abort();
+      candidateController?.abort();
+    };
   });
 
   $effect(() => {
@@ -150,6 +173,30 @@
       0,
       0,
     );
+
+    if (currentCandidateMarker) {
+      const markerX = currentCandidateMarker.x;
+      const markerY = current.height - 1 - currentCandidateMarker.y;
+      context.save();
+      context.strokeStyle = "#67e8f9";
+      context.lineWidth = 1.4;
+      context.globalAlpha = currentCandidateMarker.detected ? 1 : 0.58;
+      context.setLineDash(currentCandidateMarker.detected ? [] : [2.5, 2.5]);
+      context.beginPath();
+      context.arc(markerX, markerY, 5, 0, Math.PI * 2);
+      context.stroke();
+      context.beginPath();
+      context.moveTo(markerX - 8, markerY);
+      context.lineTo(markerX - 3, markerY);
+      context.moveTo(markerX + 3, markerY);
+      context.lineTo(markerX + 8, markerY);
+      context.moveTo(markerX, markerY - 8);
+      context.lineTo(markerX, markerY - 3);
+      context.moveTo(markerX, markerY + 3);
+      context.lineTo(markerX, markerY + 8);
+      context.stroke();
+      context.restore();
+    }
   });
 
   function spectrallyCompatible(a: Frame, b: Frame) {
@@ -361,6 +408,10 @@
           activeQuery = submitted;
           totalObservations = result.total;
           previewSavedAt = null;
+          candidateController?.abort();
+          candidateResult = null;
+          candidateError = null;
+          selectedCandidateId = null;
           index = 0;
           referenceIndex = 0;
           zoom = 1;
@@ -528,6 +579,52 @@
         "No se pudo acceder al portapapeles. Copia la URL de la barra del navegador.",
       ];
     }
+  }
+
+  async function runCandidateAnalysis() {
+    if (!activeQuery || observations.length < 3 || candidateBusy) return;
+
+    candidateController?.abort();
+    candidateController = new AbortController();
+    candidateBusy = true;
+    candidateError = null;
+    selectedCandidateId = null;
+
+    try {
+      candidateResult = await analyzeCandidates(
+        activeQuery,
+        observations,
+        candidateController.signal,
+      );
+      if (candidateResult.candidates.length)
+        selectedCandidateId = candidateResult.candidates[0].id;
+    } catch (error) {
+      if (candidateController.signal.aborted) return;
+      candidateError =
+        error instanceof Error
+          ? error.message
+          : "No se pudo completar el análisis de candidatos.";
+    } finally {
+      if (!candidateController.signal.aborted) candidateBusy = false;
+    }
+  }
+
+  function selectCandidate(candidate: Candidate) {
+    selectedCandidateId = candidate.id;
+    playing = false;
+    autoplayAllowed = false;
+    blinkReference = false;
+    mode = "image";
+
+    const firstVisible = candidate.points
+      .map((point) =>
+        observations.findIndex(
+          (observation) => observation.id === point.observation_id,
+        ),
+      )
+      .find((candidateIndex) => candidateIndex >= 0);
+
+    if (firstVisible != null) index = firstVisible;
   }
 
   function changeMode(value: string) {
@@ -1175,13 +1272,187 @@
           </div>
         {/if}
 
-        <div class="science-note">
-          <strong>¿Qué estamos buscando?</strong>
-          <p>
-            Fuentes que cambien de posición o brillo entre observaciones. El
-            análisis automático de candidatos se conectará a este visor sin
-            reemplazar la revisión humana.
+        <div class="candidate-tool">
+          <div class="candidate-heading">
+            <div>
+              <span class="eyebrow">Análisis automático</span>
+              <strong>Candidatos en esta región</strong>
+            </div>
+            <button
+              type="button"
+              class="candidate-run"
+              onclick={() => void runCandidateAnalysis()}
+              disabled={frames.length < 3 || candidateBusy || busy}
+            >
+              {candidateBusy
+                ? "Analizando…"
+                : candidateResult
+                  ? "Analizar de nuevo"
+                  : "Buscar candidatos"}
+            </button>
+          </div>
+
+          <p class="candidate-intro">
+            Detecta fuentes compactas, las asocia entre épocas y prioriza
+            movimiento aparente o variabilidad. Es un ranking de revisión, no
+            una confirmación de descubrimiento.
           </p>
+
+          {#if candidateBusy}
+            <div class="candidate-loading" role="status">
+              <span class="live-dot"></span>
+              Reutilizando las imágenes cargadas y construyendo trayectorias…
+            </div>
+          {/if}
+
+          {#if candidateError}
+            <div class="candidate-error" role="alert">
+              <strong>Análisis no completado</strong>
+              <span>{candidateError}</span>
+            </div>
+          {/if}
+
+          {#if candidateResult}
+            <div class="candidate-diagnostics">
+              <span
+                ><strong>{candidateResult.diagnostics.frames_analyzed}</strong>
+                épocas</span
+              >
+              <span
+                ><strong>{candidateResult.diagnostics.detections}</strong>
+                detecciones</span
+              >
+              <span
+                ><strong>{candidateResult.candidates.length}</strong>
+                candidatos</span
+              >
+            </div>
+
+            {#each candidateResult.warnings as candidateWarning}
+              <p class="candidate-warning">{candidateWarning}</p>
+            {/each}
+
+            {#if candidateResult.candidates.length}
+              <div class="candidate-list" aria-label="Lista de candidatos">
+                {#each candidateResult.candidates as candidate, candidateIndex}
+                  <button
+                    type="button"
+                    class="candidate-row"
+                    class:active={candidate.id === selectedCandidateId}
+                    onclick={() => selectCandidate(candidate)}
+                  >
+                    <span class="candidate-rank"
+                      >{String(candidateIndex + 1).padStart(2, "0")}</span
+                    >
+                    <span class="candidate-copy">
+                      <strong
+                        >{candidate.id} · {candidate.kind === "motion"
+                          ? "Movimiento"
+                          : candidate.kind === "variability"
+                            ? "Variabilidad"
+                            : "Movimiento + variabilidad"}</strong
+                      >
+                      <small
+                        >{candidate.epochs} épocas · {candidate.reason}</small
+                      >
+                    </span>
+                    <span class="candidate-score">{candidate.score}</span>
+                  </button>
+                {/each}
+              </div>
+
+              {#if selectedCandidate}
+                <div class="candidate-details">
+                  <div class="candidate-detail-heading">
+                    <div>
+                      <span>Candidato seleccionado</span>
+                      <strong>{selectedCandidate.id}</strong>
+                    </div>
+                    <span
+                      class="confidence"
+                      class:high={selectedCandidate.confidence === "high"}
+                      class:medium={selectedCandidate.confidence === "medium"}
+                      >{selectedCandidate.confidence === "high"
+                        ? "alta prioridad"
+                        : selectedCandidate.confidence === "medium"
+                          ? "prioridad media"
+                          : "prioridad baja"}</span
+                    >
+                  </div>
+
+                  <div class="candidate-metrics">
+                    <div>
+                      <span>Score</span>
+                      <strong>{selectedCandidate.score}/100</strong>
+                    </div>
+                    <div>
+                      <span>Épocas</span>
+                      <strong>{selectedCandidate.epochs}</strong>
+                    </div>
+                    <div>
+                      <span>Desplazamiento</span>
+                      <strong
+                        >{selectedCandidate.motion_arcsec.toFixed(2)}″</strong
+                      >
+                    </div>
+                    <div>
+                      <span>Movimiento/año</span>
+                      <strong
+                        >{selectedCandidate.motion_arcsec_per_year.toFixed(
+                          2,
+                        )}″/año</strong
+                      >
+                    </div>
+                    <div>
+                      <span>Linealidad</span>
+                      <strong
+                        >{Math.round(
+                          selectedCandidate.motion_linearity * 100,
+                        )}%</strong
+                      >
+                    </div>
+                    <div>
+                      <span>Variabilidad</span>
+                      <strong
+                        >{Math.round(
+                          selectedCandidate.flux_variability * 100,
+                        )}%</strong
+                      >
+                    </div>
+                    <div>
+                      <span>Cobertura temporal</span>
+                      <strong
+                        >{Math.round(
+                          selectedCandidate.coverage_fraction * 100,
+                        )}%</strong
+                      >
+                    </div>
+                    <div>
+                      <span>Continuidad</span>
+                      <strong
+                        >{Math.round(
+                          selectedCandidate.continuity * 100,
+                        )}%</strong
+                      >
+                    </div>
+                  </div>
+
+                  <p class="candidate-caveat">
+                    Marcador cian continuo = detección asociada. Marcador cian
+                    punteado = posición predicha durante un hueco corto del
+                    track. El score es heurístico: sirve para priorizar revisión
+                    humana, no para declarar un objeto nuevo.
+                  </p>
+                </div>
+              {/if}
+            {:else}
+              <div class="candidate-empty">
+                No se encontraron candidatos que superen los criterios mínimos
+                en esta muestra temporal. Eso no significa que la región carezca
+                de fuentes interesantes.
+              </div>
+            {/if}
+          {/if}
         </div>
       </div>
       {#each warnings as warning}<p class="notice">{warning}</p>{/each}
