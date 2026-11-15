@@ -148,3 +148,35 @@ def test_api_rejects_invalid_coordinates():
 
 def test_reprocessed_retry_products_are_allowed():
     assert archive.valid_source(URL.replace("l2b-v", "l2b_retry-v"))
+
+
+def test_download_retries_transient_errors_but_not_invalid_requests(monkeypatch):
+    client_class = httpx.Client
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(503 if len(calls) == 1 else 200, content=b"FITS")
+
+    monkeypatch.setattr(
+        archive.httpx,
+        "Client",
+        lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    monkeypatch.setattr(archive.time, "sleep", lambda _: None)
+    assert archive.download(URL, {}, 100) == b"FITS"
+    assert len(calls) == 2
+
+    def invalid(request):
+        calls.append(request)
+        return httpx.Response(400)
+
+    monkeypatch.setattr(
+        archive.httpx,
+        "Client",
+        lambda **kwargs: client_class(transport=httpx.MockTransport(invalid), **kwargs),
+    )
+    calls.clear()
+    with pytest.raises(httpx.HTTPStatusError):
+        archive.download(URL, {}, 100)
+    assert len(calls) == 1

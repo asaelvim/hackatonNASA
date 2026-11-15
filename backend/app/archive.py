@@ -1,8 +1,10 @@
 import base64
 import hashlib
 import io
+import logging
 import math
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from xml.etree import ElementTree
@@ -19,6 +21,7 @@ from scipy.ndimage import map_coordinates
 SIA_URL = "https://irsa.ipac.caltech.edu/SIA"
 COLLECTIONS = ("spherex_dr1", "spherex_qr3")
 MAX_RECORDS = 20000
+logger = logging.getLogger("spherex")
 SOURCE_PATTERN = re.compile(
     r"https://irsa\.ipac\.caltech\.edu/ibe/data/spherex/(dr1|qr3)/level2/"
     r"\d{4}W\d{2}_[A-Z0-9]+/l2b(?:_retry)?-v\d+-\d{4}-\d{3}/[1-6]/"
@@ -36,15 +39,29 @@ def valid_source(url: str) -> bool:
 
 
 def download(url: str, params: dict, max_bytes: int) -> bytes:
-    with httpx.Client(timeout=120, follow_redirects=False) as client:
-        with client.stream("GET", url, params=params) as response:
-            response.raise_for_status()
-            content = bytearray()
-            for chunk in response.iter_bytes():
-                content.extend(chunk)
-                if len(content) > max_bytes:
-                    raise ArchiveError("IRSA devolvió un archivo demasiado grande.")
-            return bytes(content)
+    for attempt in range(3):
+        try:
+            with httpx.Client(timeout=120, follow_redirects=False) as client:
+                with client.stream("GET", url, params=params) as response:
+                    response.raise_for_status()
+                    content = bytearray()
+                    for chunk in response.iter_bytes():
+                        content.extend(chunk)
+                        if len(content) > max_bytes:
+                            raise ArchiveError(
+                                "IRSA devolvió un archivo demasiado grande."
+                            )
+                    return bytes(content)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in (429, 502, 503, 504) or attempt == 2:
+                raise
+            logger.warning("IRSA devolvió %s; reintentando", exc.response.status_code)
+        except httpx.TransportError:
+            if attempt == 2:
+                raise
+            logger.warning("Conexión con IRSA interrumpida; reintentando")
+        time.sleep(2**attempt)
+    raise ArchiveError("La descarga de IRSA no se completó.")
 
 
 def query_collection(collection: str, ra: float, dec: float) -> tuple[list, bool]:
