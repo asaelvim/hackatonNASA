@@ -13,6 +13,7 @@
   import type { Query } from "./lib/sky";
   import { renderPixels, sharedRange } from "./lib/render";
   import type { Mode } from "./lib/render";
+  import { getSavedPreview, matchesSavedPreview } from "./lib/saved-preview";
 
   let query = $state<Query>({ ...defaults });
   let activeQuery = $state<Query | null>(null);
@@ -25,6 +26,9 @@
   let index = $state(0);
   let referenceIndex = $state(0);
   let playing = $state(false);
+  let autoplayAllowed = $state(false);
+  let previewSavedAt = $state<string | null>(null);
+  const usingPreview = $derived(previewSavedAt !== null);
   let fps = $state(2);
   let mode = $state<Mode>("image");
   let contrast = $state(5);
@@ -49,6 +53,16 @@
 
   onMount(() => {
     query = readQuery(window.location.search);
+    autoplayAllowed = !window.matchMedia("(prefers-reduced-motion: reduce)")
+      .matches;
+    const preview = getSavedPreview(query);
+    if (preview) {
+      observations = preview.observations;
+      frames = preview.frames;
+      previewSavedAt = preview.savedAt;
+      activeQuery = { ...query };
+      playing = autoplayAllowed;
+    }
     void explore();
     return () => controller?.abort();
   });
@@ -107,18 +121,26 @@
     const signal = controller.signal;
     const token = ++generation;
     const submitted = { ...query };
-    playing = false;
+    const retainPreview = usingPreview && matchesSavedPreview(submitted);
+    if (!retainPreview) {
+      playing = false;
+      autoplayAllowed = !window.matchMedia("(prefers-reduced-motion: reduce)")
+        .matches;
+      frames = [];
+      observations = [];
+      previewSavedAt = null;
+      index = 0;
+      referenceIndex = 0;
+    }
     blinkReference = false;
     mode = "image";
-    frames = [];
-    observations = [];
     errors = [];
     warnings = [];
-    index = 0;
-    referenceIndex = 0;
     busy = true;
     activeQuery = submitted;
-    status = "Consultando DR1 y QR3 en NASA/IPAC IRSA…";
+    status = retainPreview
+      ? "Vista previa guardada · actualizando desde IRSA…"
+      : "Consultando DR1 y QR3 en NASA/IPAC IRSA…";
     window.history.replaceState(
       null,
       "",
@@ -129,8 +151,9 @@
       if (token !== generation) return;
       warnings = result.warnings;
       if (!result.observations.length) {
-        status =
-          "No hay observaciones disponibles para estas coordenadas y detector.";
+        status = usingPreview
+          ? "IRSA no devolvió observaciones para actualizar la vista previa."
+          : "No hay observaciones disponibles para estas coordenadas y detector.";
         return;
       }
       const loaded: { observation: Observation; frame: Frame }[] = [];
@@ -140,6 +163,12 @@
       const publish = () => {
         const currentId = observations[index]?.id;
         const referenceId = observations[referenceIndex]?.id;
+        if (usingPreview) {
+          previewSavedAt = null;
+          playing = false;
+          mode = "image";
+          blinkReference = false;
+        }
         loaded.sort((a, b) => a.observation.mjd - b.observation.mjd);
         observations = loaded.map((item) => item.observation);
         frames = loaded.map((item) => item.frame);
@@ -153,8 +182,7 @@
         );
         if (frames.length >= 2 && !autoplayStarted) {
           autoplayStarted = true;
-          playing = !window.matchMedia("(prefers-reduced-motion: reduce)")
-            .matches;
+          playing = autoplayAllowed;
         }
       };
       const worker = async () => {
@@ -179,9 +207,11 @@
       };
       await Promise.all([worker(), worker()]);
       if (token !== generation || signal.aborted) return;
-      status = frames.length
-        ? `${frames.length} imágenes reales listas · ${result.total} observaciones encontradas`
-        : "No se pudo preparar ninguna imagen. Consulta los errores.";
+      status = usingPreview
+        ? "No se pudo actualizar. Se conserva la vista previa guardada."
+        : frames.length
+          ? `${frames.length} imágenes reales listas · ${result.total} observaciones encontradas`
+          : "No se pudo preparar ninguna imagen. Consulta los errores.";
       if (frames.length === 1)
         warnings = [
           ...warnings,
@@ -192,7 +222,9 @@
       errors = [
         error instanceof Error ? error.message : "No se pudo consultar IRSA.",
       ];
-      status = "La consulta no se completó.";
+      status = usingPreview
+        ? "La actualización falló. Se conserva la vista previa guardada."
+        : "La consulta no se completó.";
     } finally {
       if (token === generation) busy = false;
     }
@@ -202,6 +234,7 @@
     controller?.abort();
     generation++;
     playing = false;
+    autoplayAllowed = false;
     blinkReference = false;
     busy = false;
     status = frames.length
@@ -230,6 +263,7 @@
 
   function step(delta: number) {
     playing = false;
+    autoplayAllowed = false;
     blinkReference = false;
     index = (index + delta + frames.length) % frames.length;
   }
@@ -376,6 +410,15 @@
         <div class="status" role="status">
           <span class="live-dot"></span>{status}
         </div>
+        {#if usingPreview}
+          <p class="hint" data-testid="saved-preview">
+            Vista previa guardada de Barnard · preparada el {previewSavedAt?.slice(
+              0,
+              10,
+            )}. Son observaciones reales con sus fechas originales, no una
+            consulta actualizada ni imágenes simuladas.
+          </p>
+        {/if}
         <div class="sky-view" class:has-image={!!current}>
           {#if current}
             <canvas
@@ -423,7 +466,10 @@
               class="play"
               aria-label={playing ? "Pausar" : "Reproducir"}
               disabled={frames.length < 2}
-              onclick={() => (playing = !playing)}>{playing ? "Ⅱ" : "▶"}</button
+              onclick={() => {
+                playing = !playing;
+                autoplayAllowed = playing;
+              }}>{playing ? "Ⅱ" : "▶"}</button
             >
             <button
               aria-label="Imagen siguiente"
@@ -451,6 +497,7 @@
           disabled={!frames.length}
           oninput={() => {
             playing = false;
+            autoplayAllowed = false;
             blinkReference = false;
           }}
         />

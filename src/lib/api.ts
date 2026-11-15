@@ -30,6 +30,11 @@ export interface Frame {
   pixel_scale_arcsec: number;
 }
 
+export type EncodedFrame = Omit<Frame, "pixels" | "flags"> & {
+  pixels: string;
+  flags: string;
+};
+
 async function json<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const body = await response.json();
@@ -65,14 +70,23 @@ export function decodeFloats(encoded: string): Float32Array {
   );
 }
 
+export function decodeFrame(result: EncodedFrame): Frame {
+  const pixels = decodeFloats(result.pixels);
+  const flags = Uint8Array.from(atob(result.flags), (c) => c.charCodeAt(0));
+  if (
+    pixels.length !== result.width * result.height ||
+    flags.length !== pixels.length
+  )
+    throw new Error("El tamaño del recorte no coincide con sus metadatos.");
+  return { ...result, pixels, flags };
+}
+
 export async function loadFrame(
   observation: Observation,
   query: Query,
   signal: AbortSignal,
 ): Promise<Frame> {
-  const result = await json<
-    Omit<Frame, "pixels" | "flags"> & { pixels: string; flags: string }
-  >(
+  const result = await json<EncodedFrame>(
     await fetch("/api/frame", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -85,12 +99,5 @@ export async function loadFrame(
       signal,
     }),
   );
-  const pixels = decodeFloats(result.pixels);
-  const flags = Uint8Array.from(atob(result.flags), (c) => c.charCodeAt(0));
-  if (
-    pixels.length !== result.width * result.height ||
-    flags.length !== pixels.length
-  )
-    throw new Error("El tamaño del recorte no coincide con sus metadatos.");
-  return { ...result, pixels, flags };
+  return decodeFrame(result);
 }

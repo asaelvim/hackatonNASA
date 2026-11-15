@@ -45,12 +45,18 @@ y una política de caché para las descargas.
 
 ## Explorar
 
-Al abrir la página se consulta automáticamente la región de Barnard, o las
-coordenadas indicadas en la URL. La primera imagen real aparece en cuanto está
-lista, mientras se descargan las demás. Con dos imágenes comienza la reproducción
-automática, salvo que el navegador indique una preferencia de movimiento reducido.
-La primera visita necesita conexión a IRSA; no se muestra una animación sintética
-ni se garantiza una respuesta instantánea del archivo.
+Al abrir la región inicial de Barnard se muestran dos observaciones reales
+guardadas con la aplicación, sin esperar ninguna respuesta de IRSA. Se identifican
+como **vista previa guardada**, con las fechas originales y los enlaces FITS de
+procedencia. En paralelo se consulta el archivo; la primera imagen nueva reemplaza
+la vista previa y las demás aparecen conforme están listas.
+
+Para otras coordenadas, campos de visión o detectores, la primera imagen depende
+de IRSA: no se muestra la vista de Barnard como si perteneciera a otra región.
+Con dos imágenes comienza la reproducción automática, salvo que el navegador
+indique movimiento reducido o que el usuario haya pausado la reproducción.
+Si IRSA falla, se muestra el error y, cuando existe, permanece la vista previa
+real claramente etiquetada; no se sustituye la respuesta por una animación sintética.
 
 Selecciona Barnard, Epsilon Indi B, WISE 0855, RW Aurigae o R Draconis, o introduce
 ascensión recta y declinación ICRS **en grados decimales**. El campo de visión
@@ -103,6 +109,15 @@ observaciones, contraste o modo de comparación.
 
 IRSA se consulta de nuevo en cada búsqueda, sin fijar una lista local de imágenes.
 Los recortes preparados tienen una caché de hasta 16 entradas por proceso.
+La vista previa local es una muestra de dos exposiciones, no un archivo completo
+ni una garantía de descubrimiento. Para regenerarla con datos del archivo y
+volver a compilar el frontend:
+
+```bash
+PYTHONPATH=backend uv run --project backend python backend/scripts/cache_preview.py
+npm run build
+```
+
 Las descargas tienen límites de tamaño y hasta tres intentos ante fallos
 transitorios; los errores definitivos se muestran, nunca se sustituyen por datos
 sintéticos.

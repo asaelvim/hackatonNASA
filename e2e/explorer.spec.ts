@@ -109,7 +109,7 @@ test("un error del archivo no se sustituye por imágenes ficticias", async ({
   await page.route("**/api/observations?*", (route) =>
     route.fulfill({ status: 502, json: { detail: "IRSA no disponible." } }),
   );
-  await page.goto("/");
+  await page.goto("/?ra=0&dec=0&fov=12&detector=1");
   await expect(page.getByRole("alert")).toContainText("IRSA no disponible.");
   await expect(page.locator("canvas")).toHaveCount(0);
 });
@@ -118,7 +118,7 @@ test("cancelar una consulta devuelve el control sin crear una serie", async ({
   page,
 }) => {
   await page.route("**/api/observations?*", () => {});
-  await page.goto("/");
+  await page.goto("/?ra=0&dec=0&fov=12&detector=1");
   await page.getByRole("button", { name: "Cancelar consulta" }).click();
   await expect(page.getByRole("status")).toContainText("Consulta cancelada");
   await expect(
@@ -201,13 +201,76 @@ test("cancelar conserva las imágenes que ya se mostraban", async ({ page }) => 
   });
   try {
     await page.goto("/");
-    await expect(page.locator("canvas")).toBeVisible();
+    await expect(page.locator("canvas")).toHaveAttribute("width", "2");
     await page.getByRole("button", { name: "Cancelar consulta" }).click();
     await expect(page.getByRole("status")).toContainText(
       "Se conservaron 1 imágenes",
     );
     await expect(page.locator(".image-label")).toContainText("2025-05-01");
     await expect(page.locator(".transport > span")).toHaveText("1 / 1");
+  } finally {
+    release();
+  }
+});
+
+test("muestra la vista previa real sin esperar respuesta del archivo", async ({
+  page,
+}) => {
+  await page.route("**/api/observations?*", () => {});
+  await page.goto("/");
+  await expect(page.getByTestId("saved-preview")).toContainText(
+    "Vista previa guardada de Barnard",
+  );
+  await expect(page.locator("canvas")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Cancelar consulta" }),
+  ).toBeVisible();
+  const levels = await page.locator("canvas").evaluate((element) => {
+    const canvas = element as HTMLCanvasElement;
+    return new Set(
+      canvas.getContext("2d")!.getImageData(0, 0, canvas.width, canvas.height)
+        .data,
+    ).size;
+  });
+  expect(levels).toBeGreaterThan(10);
+});
+
+test("un fallo de IRSA se informa sin hacer pasar la vista guardada por datos nuevos", async ({
+  page,
+}) => {
+  await page.route("**/api/observations?*", (route) =>
+    route.fulfill({ status: 502, json: { detail: "IRSA no disponible." } }),
+  );
+  await page.goto("/");
+  await expect(page.getByRole("alert")).toContainText("IRSA no disponible.");
+  await expect(page.getByTestId("saved-preview")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText(
+    "La actualización falló",
+  );
+  await expect(page.locator("canvas")).toBeVisible();
+});
+
+test("actualizar la vista previa no reinicia la reproducción si el usuario la pausó", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await mockArchive(page, 2, () => pending);
+  try {
+    await page.goto("/");
+    await expect(page.getByTestId("saved-preview")).toBeVisible();
+    await page.getByRole("button", { name: "Pausar", exact: true }).click();
+    release();
+    await expect(page.getByRole("status")).toContainText(
+      "2 imágenes reales listas",
+    );
+    await expect(page.getByTestId("saved-preview")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Reproducir", exact: true }),
+    ).toBeEnabled();
   } finally {
     release();
   }
