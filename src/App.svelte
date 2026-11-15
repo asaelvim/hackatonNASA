@@ -21,7 +21,7 @@
   let warnings = $state<string[]>([]);
   let errors = $state<string[]>([]);
   let busy = $state(false);
-  let status = $state("Elige una región para consultar observaciones reales.");
+  let status = $state("Iniciando consulta de observaciones reales…");
   let index = $state(0);
   let referenceIndex = $state(0);
   let playing = $state(false);
@@ -49,7 +49,7 @@
 
   onMount(() => {
     query = readQuery(window.location.search);
-    if (window.location.search) void explore();
+    void explore();
     return () => controller?.abort();
   });
 
@@ -136,12 +136,35 @@
       const loaded: { observation: Observation; frame: Frame }[] = [];
       let next = 0;
       let completed = 0;
+      let autoplayStarted = false;
+      const publish = () => {
+        const currentId = observations[index]?.id;
+        const referenceId = observations[referenceIndex]?.id;
+        loaded.sort((a, b) => a.observation.mjd - b.observation.mjd);
+        observations = loaded.map((item) => item.observation);
+        frames = loaded.map((item) => item.frame);
+        index = Math.max(
+          0,
+          observations.findIndex((item) => item.id === currentId),
+        );
+        referenceIndex = Math.max(
+          0,
+          observations.findIndex((item) => item.id === referenceId),
+        );
+        if (frames.length >= 2 && !autoplayStarted) {
+          autoplayStarted = true;
+          playing = !window.matchMedia("(prefers-reduced-motion: reduce)")
+            .matches;
+        }
+      };
       const worker = async () => {
         while (next < result.observations.length && !signal.aborted) {
           const item = result.observations[next++];
           try {
             const frame = await loadFrame(item, submitted, signal);
+            if (token !== generation || signal.aborted) return;
             loaded.push({ observation: item, frame });
+            publish();
           } catch (error) {
             if (signal.aborted) return;
             errors = [
@@ -151,15 +174,11 @@
           }
           if (token !== generation) return;
           completed++;
-          status = `Preparando recortes y alineación WCS: ${completed}/${result.observations.length}`;
+          status = `Cargando recortes: ${completed}/${result.observations.length} · ${frames.length} imágenes visibles`;
         }
       };
       await Promise.all([worker(), worker()]);
       if (token !== generation || signal.aborted) return;
-      loaded.sort((a, b) => a.observation.mjd - b.observation.mjd);
-      observations = loaded.map((item) => item.observation);
-      frames = loaded.map((item) => item.frame);
-      index = frames.length > 1 ? 1 : 0;
       status = frames.length
         ? `${frames.length} imágenes reales listas · ${result.total} observaciones encontradas`
         : "No se pudo preparar ninguna imagen. Consulta los errores.";
@@ -182,8 +201,12 @@
   function cancel() {
     controller?.abort();
     generation++;
+    playing = false;
+    blinkReference = false;
     busy = false;
-    status = "Consulta cancelada. Puedes iniciar otra búsqueda.";
+    status = frames.length
+      ? `Consulta cancelada. Se conservaron ${frames.length} imágenes cargadas.`
+      : "Consulta cancelada. Puedes iniciar otra búsqueda.";
   }
 
   async function copyLink() {
@@ -350,6 +373,9 @@
             disabled={!activeQuery}>Compartir ↗</button
           >
         </div>
+        <div class="status" role="status">
+          <span class="live-dot"></span>{status}
+        </div>
         <div class="sky-view" class:has-image={!!current}>
           {#if current}
             <canvas
@@ -375,7 +401,7 @@
               </h3>
               <p>
                 {busy
-                  ? "IRSA puede tardar en preparar los archivos FITS. Las imágenes se alinean antes de mostrarse."
+                  ? "IRSA está preparando los archivos FITS. Cada imagen aparecerá en cuanto esté alineada y lista."
                   : "Elige uno de los cinco objetos de referencia o introduce tus propias coordenadas."}
               </p>
               <span class="badge"
@@ -524,9 +550,6 @@
             {mode === "blink" ? "Pulsa reproducir para alternar." : ""}
           </p>
         {/if}
-      </div>
-      <div class="status" role="status">
-        <span class="live-dot" class:pulse={busy}></span>{status}
       </div>
       {#each warnings as warning}<p class="notice">{warning}</p>{/each}
       {#if errors.length}<div class="error-box" role="alert">

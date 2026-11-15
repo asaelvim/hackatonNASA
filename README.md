@@ -45,6 +45,13 @@ y una política de caché para las descargas.
 
 ## Explorar
 
+Al abrir la página se consulta automáticamente la región de Barnard, o las
+coordenadas indicadas en la URL. La primera imagen real aparece en cuanto está
+lista, mientras se descargan las demás. Con dos imágenes comienza la reproducción
+automática, salvo que el navegador indique una preferencia de movimiento reducido.
+La primera visita necesita conexión a IRSA; no se muestra una animación sintética
+ni se garantiza una respuesta instantánea del archivo.
+
 Selecciona Barnard, Epsilon Indi B, WISE 0855, RW Aurigae o R Draconis, o introduce
 ascensión recta y declinación ICRS **en grados decimales**. El campo de visión
 abarca entre 1 y 30 minutos de arco; los ejemplos comienzan con 12′ para dejar
@@ -55,6 +62,7 @@ Pulsa **Explorar región**. La API consulta las colecciones Wide Survey
 el detector y descarga hasta 12 recortes distribuidos sobre el intervalo
 encontrado. No utiliza el cubo combinado del cielo para simular épocas.
 Las consultas truncadas y las imágenes que no pudieron cargarse se notifican.
+Puedes cancelar la descarga sin perder las imágenes ya cargadas.
 
 Las imágenes se reproyectan con WCS e interpolación bilineal a una cuadrícula TAN
 común, con norte arriba, este a la izquierda y escala próxima a 6.2″/píxel. Los
