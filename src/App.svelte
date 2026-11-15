@@ -219,11 +219,9 @@
 <div class="app">
   <header>
     <a class="brand" href="/" aria-label="Inicio de SPHEREx Explorer"
-      ><span class="brand-mark">✦</span><span
-        >SPHEREx <strong>Explorer</strong></span
-      ></a
+      ><span>SPHEREx <strong>Explorer</strong></span></a
     >
-    <span class="badge">ASTRONOMÍA CIUDADANA</span>
+    <span class="badge">Astronomía ciudadana</span>
     <a
       class="archive-link"
       href="https://irsa.ipac.caltech.edu/Missions/spherex.html"
@@ -233,7 +231,6 @@
   </header>
 
   <section class="intro">
-    <span class="eyebrow">UN MISMO CIELO. DIFERENTES MOMENTOS.</span>
     <h1>Encuentra lo que <span>cambia.</span></h1>
     <p>
       Explora el universo infrarrojo y compara observaciones reales de SPHEREx.
@@ -244,7 +241,7 @@
   <main>
     <aside class="panel search-panel">
       <div class="panel-title">
-        <span>01 / REGIÓN DEL CIELO</span><span class="live-dot"></span>
+        <span>Región del cielo</span><span class="live-dot"></span>
       </div>
       <form
         onsubmit={(event) => {
@@ -326,7 +323,7 @@
           >{/if}
       </form>
       <div class="source-note">
-        <span class="eyebrow">FUENTE CIENTÍFICA</span><strong
+        <span class="eyebrow">Fuente de datos</span><strong
           >SPHEREx DR1 + QR3</strong
         >
         <p>
@@ -340,7 +337,7 @@
       <div class="panel viewer-panel">
         <div class="viewer-heading">
           <div>
-            <span class="eyebrow">02 / VISOR TEMPORAL</span>
+            <span class="eyebrow">Visor temporal</span>
             <h2>
               {activeQuery
                 ? `${activeQuery.ra.toFixed(5)}°, ${activeQuery.dec.toFixed(5)}°`
@@ -371,7 +368,6 @@
             </div>
           {:else}
             <div class="empty-state">
-              <div class="orbit" class:loading={busy}><span>✦</span></div>
               <h3>
                 {busy
                   ? "Recuperando un fragmento del cielo"
@@ -443,7 +439,7 @@
       </div>
 
       <div class="panel analysis-panel">
-        <span class="eyebrow">03 / COMPARA Y EXPLORA</span>
+        <span class="eyebrow">Comparar imágenes</span>
         <div class="analysis-controls">
           <div>
             <label for="mode">Visualización</label><select

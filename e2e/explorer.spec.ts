@@ -131,3 +131,15 @@ test("los controles no desbordan la pantalla en móviles estrechos", async ({
   );
   expect(overflows).toBe(false);
 });
+
+test("el contenido aprovecha el ancho de las pantallas grandes", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto("/");
+  const layout = await page.locator("main").evaluate((element) => ({
+    width: element.getBoundingClientRect().width,
+    viewport: window.innerWidth,
+  }));
+  expect(layout.width).toBeGreaterThan(layout.viewport * 0.9);
+});
