@@ -27,6 +27,8 @@ export interface Frame {
   bandwidth_um: number | null;
   coverage: number;
   flagged_fraction: number;
+  source_fraction?: number;
+  zodi_subtracted?: boolean;
   pixel_scale_arcsec: number;
 }
 
@@ -55,7 +57,7 @@ export async function search(
     ra: String(query.ra),
     dec: String(query.dec),
     detector: String(query.detector),
-    limit: "12",
+    limit: "16",
   });
   return json(await fetch(`/api/observations?${params}`, { signal }));
 }

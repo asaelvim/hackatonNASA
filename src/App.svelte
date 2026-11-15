@@ -15,13 +15,23 @@
   import type { Mode } from "./lib/render";
   import { getSavedPreview, matchesSavedPreview } from "./lib/saved-preview";
 
+  const DISPLAY_FRAME_LIMIT = 12;
+
   let query = $state<Query>({ ...defaults });
   let activeQuery = $state<Query | null>(null);
   let observations = $state<Observation[]>([]);
+  let totalObservations = $state(0);
   let frames = $state<Frame[]>([]);
   let warnings = $state<string[]>([]);
   let errors = $state<string[]>([]);
+  let frameIssues = $state<string[]>([]);
   let busy = $state(false);
+  let progress = $state(0);
+  let progressPhase = $state<
+    "idle" | "searching" | "loading" | "ready" | "partial" | "error"
+  >("idle");
+  let progressLabel = $state("Listo para explorar.");
+  let retryAvailable = $state(false);
   let status = $state("Iniciando consulta de observaciones reales…");
   let index = $state(0);
   let referenceIndex = $state(0);
@@ -35,6 +45,13 @@
   let hideFlags = $state(false);
   let blinkReference = $state(false);
   let canvas = $state<HTMLCanvasElement>();
+  let skyContainer = $state<HTMLDivElement>();
+  let zoom = $state(1);
+  let panX = $state(0);
+  let panY = $state(0);
+  let dragging = $state(false);
+  let dragStartX = 0;
+  let dragStartY = 0;
   let controller: AbortController | undefined;
   let generation = 0;
   const range = $derived(sharedRange(frames, hideFlags));
@@ -43,12 +60,41 @@
   );
   const current = $derived(frames[shownIndex]);
   const observation = $derived(observations[shownIndex]);
+  const referenceFrame = $derived(frames[referenceIndex]);
+  const wavelengthDelta = $derived(
+    current?.wavelength_um != null && referenceFrame?.wavelength_um != null
+      ? Math.abs(current.wavelength_um - referenceFrame.wavelength_um)
+      : null,
+  );
+  const comparisonCompatible = $derived(
+    !!current &&
+      !!referenceFrame &&
+      spectrallyCompatible(current, referenceFrame),
+  );
+  const differenceScienceReady = $derived(
+    comparisonCompatible &&
+      current?.zodi_subtracted === true &&
+      referenceFrame?.zodi_subtracted === true,
+  );
+  const hasCompatibleReference = $derived(
+    !!current &&
+      frames.some(
+        (frame, i) => i !== index && spectrallyCompatible(current, frame),
+      ),
+  );
   const selectedPreset = $derived(
     presets.find(
       (p) =>
         Math.abs(p.ra - query.ra) < 0.000001 &&
         Math.abs(p.dec - query.dec) < 0.000001,
     ),
+  );
+  const queryDirty = $derived(
+    !!activeQuery &&
+      (Math.abs(activeQuery.ra - query.ra) > 0.000001 ||
+        Math.abs(activeQuery.dec - query.dec) > 0.000001 ||
+        activeQuery.fov !== query.fov ||
+        activeQuery.detector !== query.detector),
   );
 
   onMount(() => {
@@ -58,6 +104,7 @@
     const preview = getSavedPreview(query);
     if (preview) {
       observations = preview.observations;
+      totalObservations = preview.observations.length;
       frames = preview.frames;
       previewSavedAt = preview.savedAt;
       activeQuery = { ...query };
@@ -105,6 +152,138 @@
     );
   });
 
+  function spectrallyCompatible(a: Frame, b: Frame) {
+    if (a.wavelength_um == null || b.wavelength_um == null) return false;
+    const widths = [a.bandwidth_um, b.bandwidth_um].filter(
+      (value) => typeof value === "number" && value > 0,
+    ) as number[];
+    const tolerance = widths.length
+      ? Math.max(0.005, Math.min(...widths) * 0.5)
+      : 0.02;
+    return Math.abs(a.wavelength_um - b.wavelength_um) <= tolerance;
+  }
+
+  function bestReferenceIndex() {
+    if (!current || frames.length < 2) return null;
+
+    const candidates = frames
+      .map((frame, i) => ({
+        frame,
+        i,
+        compatible: i !== index && spectrallyCompatible(current, frame),
+        wavelengthDelta:
+          i !== index &&
+          current.wavelength_um != null &&
+          frame.wavelength_um != null
+            ? Math.abs(current.wavelength_um - frame.wavelength_um)
+            : Number.POSITIVE_INFINITY,
+        timeDelta:
+          i !== index
+            ? Math.abs(observations[i].mjd - observations[index].mjd)
+            : -1,
+      }))
+      .filter(({ i }) => i !== index);
+
+    const compatible = candidates
+      .filter(({ compatible }) => compatible)
+      .sort((a, b) => b.timeDelta - a.timeDelta);
+
+    if (compatible.length) return compatible[0].i;
+
+    candidates.sort(
+      (a, b) =>
+        a.wavelengthDelta - b.wavelengthDelta || b.timeDelta - a.timeDelta,
+    );
+    return candidates[0]?.i ?? null;
+  }
+
+  function sampleLoaded(
+    items: { observation: Observation; frame: Frame }[],
+    limit: number,
+  ) {
+    const sorted = [...items].sort(
+      (a, b) => a.observation.mjd - b.observation.mjd,
+    );
+    if (sorted.length <= limit) return sorted;
+    const indices = Array.from({ length: limit }, (_, i) =>
+      Math.round((i * (sorted.length - 1)) / (limit - 1)),
+    );
+    return indices.map((i) => sorted[i]);
+  }
+
+  function clampPan() {
+    if (!canvas || !skyContainer || zoom <= 1) {
+      panX = 0;
+      panY = 0;
+      return;
+    }
+
+    const maxX = Math.max(
+      0,
+      (canvas.clientWidth * zoom - skyContainer.clientWidth) / 2,
+    );
+    const maxY = Math.max(
+      0,
+      (canvas.clientHeight * zoom - skyContainer.clientHeight) / 2,
+    );
+
+    panX = Math.min(maxX, Math.max(-maxX, panX));
+    panY = Math.min(maxY, Math.max(-maxY, panY));
+  }
+
+  function zoomBy(delta: number) {
+    const next = Math.min(4, Math.max(1, Number((zoom + delta).toFixed(2))));
+    if (next === zoom) return;
+    zoom = next;
+    requestAnimationFrame(clampPan);
+  }
+
+  function resetZoom() {
+    zoom = 1;
+    panX = 0;
+    panY = 0;
+  }
+
+  function startPan(event: PointerEvent) {
+    if (zoom <= 1 || !skyContainer) return;
+
+    const target = event.target as HTMLElement | null;
+    if (
+      target?.closest(
+        ".viewer-tools, .image-label, .image-scale, button, select, input, a",
+      )
+    )
+      return;
+
+    dragging = true;
+    dragStartX = event.clientX - panX;
+    dragStartY = event.clientY - panY;
+    skyContainer.setPointerCapture(event.pointerId);
+  }
+
+  function movePan(event: PointerEvent) {
+    if (!dragging || zoom <= 1) return;
+    panX = event.clientX - dragStartX;
+    panY = event.clientY - dragStartY;
+    clampPan();
+  }
+
+  function endPan(event: PointerEvent) {
+    if (!dragging) return;
+    dragging = false;
+    if (skyContainer?.hasPointerCapture(event.pointerId))
+      skyContainer.releasePointerCapture(event.pointerId);
+  }
+
+  async function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await skyContainer?.requestFullscreen();
+    } catch {
+      errors = [...errors, "No se pudo cambiar al modo de pantalla completa."];
+    }
+  }
+
   function selectPreset(value: string) {
     const preset = presets[Number(value)];
     query = { ...query, ra: preset.ra, dec: preset.dec, fov: 12 };
@@ -116,75 +295,105 @@
       errors = [validation];
       return;
     }
+
     controller?.abort();
     controller = new AbortController();
     const signal = controller.signal;
     const token = ++generation;
     const submitted = { ...query };
     const retainPreview = usingPreview && matchesSavedPreview(submitted);
-    if (!retainPreview) {
-      playing = false;
-      autoplayAllowed = !window.matchMedia("(prefers-reduced-motion: reduce)")
-        .matches;
-      frames = [];
-      observations = [];
-      previewSavedAt = null;
-      index = 0;
-      referenceIndex = 0;
-    }
+
+    // Keep the last successful view on screen until the new query has at
+    // least one usable frame. This avoids a blank app when IRSA is degraded.
+    playing = false;
+    autoplayAllowed = !window.matchMedia("(prefers-reduced-motion: reduce)")
+      .matches;
     blinkReference = false;
     mode = "image";
     errors = [];
     warnings = [];
+    frameIssues = [];
     busy = true;
-    activeQuery = submitted;
+    retryAvailable = false;
+    progress = 10;
+    progressPhase = "searching";
+    progressLabel = "Buscando observaciones en SPHEREx DR1 y QR3…";
     status = retainPreview
-      ? "Vista previa guardada · actualizando desde IRSA…"
+      ? "Vista previa guardada · buscando una actualización en IRSA…"
       : "Consultando DR1 y QR3 en NASA/IPAC IRSA…";
-    window.history.replaceState(
-      null,
-      "",
-      shareUrl(window.location.href, submitted),
-    );
+
     try {
       const result = await search(submitted, signal);
       if (token !== generation) return;
+
       warnings = result.warnings;
+      progress = 25;
+      progressPhase = "loading";
+      progressLabel = result.observations.length
+        ? `${result.total} observaciones encontradas · preparando ${result.observations.length} imágenes`
+        : "Consulta completada · no se encontraron observaciones para este detector";
+
       if (!result.observations.length) {
-        status = usingPreview
-          ? "IRSA no devolvió observaciones para actualizar la vista previa."
-          : "No hay observaciones disponibles para estas coordenadas y detector.";
+        status =
+          "No hay observaciones disponibles para estas coordenadas y detector. La vista anterior se conserva.";
+        progress = 100;
+        progressPhase = "ready";
         return;
       }
+
       const loaded: { observation: Observation; frame: Frame }[] = [];
       let next = 0;
       let completed = 0;
+      let frameFailures = 0;
       let autoplayStarted = false;
+      let activated = false;
+
       const publish = () => {
-        const currentId = observations[index]?.id;
-        const referenceId = observations[referenceIndex]?.id;
-        if (usingPreview) {
+        if (!loaded.length) return;
+
+        const currentId = activated ? observations[index]?.id : undefined;
+        const referenceId = activated
+          ? observations[referenceIndex]?.id
+          : undefined;
+
+        if (!activated) {
+          activated = true;
+          activeQuery = submitted;
+          totalObservations = result.total;
           previewSavedAt = null;
-          playing = false;
-          mode = "image";
-          blinkReference = false;
+          index = 0;
+          referenceIndex = 0;
+          zoom = 1;
+          panX = 0;
+          panY = 0;
+          window.history.replaceState(
+            null,
+            "",
+            shareUrl(window.location.href, submitted),
+          );
         }
-        loaded.sort((a, b) => a.observation.mjd - b.observation.mjd);
-        observations = loaded.map((item) => item.observation);
-        frames = loaded.map((item) => item.frame);
-        index = Math.max(
-          0,
-          observations.findIndex((item) => item.id === currentId),
-        );
-        referenceIndex = Math.max(
-          0,
-          observations.findIndex((item) => item.id === referenceId),
-        );
+
+        const visible = sampleLoaded(loaded, DISPLAY_FRAME_LIMIT);
+        observations = visible.map((item) => item.observation);
+        frames = visible.map((item) => item.frame);
+
+        if (currentId)
+          index = Math.max(
+            0,
+            observations.findIndex((item) => item.id === currentId),
+          );
+        if (referenceId)
+          referenceIndex = Math.max(
+            0,
+            observations.findIndex((item) => item.id === referenceId),
+          );
+
         if (frames.length >= 2 && !autoplayStarted) {
           autoplayStarted = true;
           playing = autoplayAllowed;
         }
       };
+
       const worker = async () => {
         while (next < result.observations.length && !signal.aborted) {
           const item = result.observations[next++];
@@ -195,35 +404,96 @@
             publish();
           } catch (error) {
             if (signal.aborted) return;
-            errors = [
-              ...errors,
-              `${item.date.slice(0, 10)} · ${item.obs_id}: ${error instanceof Error ? error.message : "Error al cargar la imagen."}`,
-            ];
+            frameFailures++;
+            if (frameIssues.length < 6)
+              frameIssues = [
+                ...frameIssues,
+                `${item.date.slice(0, 10)} · ${item.obs_id}: ${error instanceof Error ? error.message : "Error al cargar la imagen."}`,
+              ];
           }
+
           if (token !== generation) return;
           completed++;
-          status = `Cargando recortes: ${completed}/${result.observations.length} · ${frames.length} imágenes visibles`;
+          progress = Math.min(
+            95,
+            25 +
+              Math.round(
+                (completed / Math.max(1, result.observations.length)) * 70,
+              ),
+          );
+          progressPhase = "loading";
+          progressLabel = `Preparando imágenes ${completed}/${result.observations.length} · ${loaded.length} listas`;
+          status = `Cargando recortes: ${completed}/${result.observations.length} · ${loaded.length} imágenes visibles`;
         }
       };
+
       await Promise.all([worker(), worker()]);
       if (token !== generation || signal.aborted) return;
-      status = usingPreview
-        ? "No se pudo actualizar. Se conserva la vista previa guardada."
-        : frames.length
-          ? `${frames.length} imágenes reales listas · ${result.total} observaciones encontradas`
-          : "No se pudo preparar ninguna imagen. Consulta los errores.";
-      if (frames.length === 1)
-        warnings = [
-          ...warnings,
-          "Solo hay una imagen cargada; no es posible comparar épocas.",
-        ];
+
+      if (loaded.length) {
+        progress = 100;
+        const displayCount = frames.length;
+        const completeView = displayCount >= DISPLAY_FRAME_LIMIT;
+
+        if (completeView) {
+          progressPhase = "ready";
+          progressLabel = `${displayCount} imágenes listas · consulta completada`;
+          status = `${displayCount} imágenes reales listas · ${result.total} observaciones encontradas`;
+
+          // The backup pool succeeded. Internal failures are implementation
+          // details when the requested 12-image series is complete.
+          frameIssues = [];
+          warnings = warnings.filter(
+            (warning) =>
+              !warning.startsWith("Se seleccionaron ") &&
+              !warning.startsWith("Se muestran "),
+          );
+        } else {
+          progressPhase = frameFailures ? "partial" : "ready";
+          progressLabel = `${displayCount} de ${DISPLAY_FRAME_LIMIT} imágenes visibles · resultado parcial`;
+          status = `${displayCount} imágenes reales listas · resultado parcial`;
+
+          warnings = warnings.filter(
+            (warning) =>
+              !warning.startsWith("Se seleccionaron ") &&
+              !warning.startsWith("Se muestran "),
+          );
+
+          if (frameFailures)
+            warnings = [
+              ...warnings,
+              `${frameFailures} observación${frameFailures === 1 ? "" : "es"} del pool de respaldo no pudo${frameFailures === 1 ? "" : "ieron"} prepararse.`,
+            ];
+        }
+
+        if (displayCount === 1)
+          warnings = [
+            ...warnings,
+            "Solo hay una imagen cargada; no es posible comparar épocas.",
+          ];
+      } else {
+        progress = 0;
+        progressPhase = "error";
+        progressLabel =
+          "Las observaciones se encontraron, pero ninguna imagen pudo prepararse.";
+        retryAvailable = true;
+        status = frames.length
+          ? "La nueva consulta no pudo prepararse. Se conserva la vista anterior."
+          : "No se pudo preparar ninguna imagen.";
+      }
     } catch (error) {
       if (signal.aborted || token !== generation) return;
-      errors = [
-        error instanceof Error ? error.message : "No se pudo consultar IRSA.",
-      ];
-      status = usingPreview
-        ? "La actualización falló. Se conserva la vista previa guardada."
+
+      const message =
+        error instanceof Error ? error.message : "No se pudo consultar IRSA.";
+      errors = [message];
+      progress = 0;
+      progressPhase = "error";
+      retryAvailable = true;
+      progressLabel =
+        "IRSA no respondió correctamente. Puedes reintentar sin perder tu última vista.";
+      status = frames.length
+        ? "No se pudo actualizar. Se conserva la última consulta que funcionó."
         : "La consulta no se completó.";
     } finally {
       if (token === generation) busy = false;
@@ -237,6 +507,10 @@
     autoplayAllowed = false;
     blinkReference = false;
     busy = false;
+    retryAvailable = false;
+    progress = 0;
+    progressPhase = "idle";
+    progressLabel = "Consulta cancelada.";
     status = frames.length
       ? `Consulta cancelada. Se conservaron ${frames.length} imágenes cargadas.`
       : "Consulta cancelada. Puedes iniciar otra búsqueda.";
@@ -259,6 +533,11 @@
   function changeMode(value: string) {
     mode = value as Mode;
     blinkReference = false;
+    if (mode !== "image") {
+      const best = bestReferenceIndex();
+      if (best != null) referenceIndex = best;
+    }
+    if (mode === "difference") hideFlags = true;
   }
 
   function step(delta: number) {
@@ -267,6 +546,13 @@
     blinkReference = false;
     index = (index + delta + frames.length) % frames.length;
   }
+  $effect(() => {
+    if (mode !== "difference" || frames.length < 2 || !current) return;
+    if (referenceIndex === index) {
+      const best = bestReferenceIndex();
+      if (best != null && best !== referenceIndex) referenceIndex = best;
+    }
+  });
 </script>
 
 <svelte:head>
@@ -296,39 +582,39 @@
   </section>
 
   <main>
-    <aside class="panel search-panel">
-      <div class="panel-title">
-        <span>Región del cielo</span><span class="live-dot"></span>
+    <aside class="panel search-panel product-search">
+      <div class="search-copy">
+        <span class="eyebrow">Explorar el cielo</span>
+        <h2>¿Qué quieres observar?</h2>
+        <p>
+          Elige un objeto conocido o introduce coordenadas. Nosotros reunimos
+          las observaciones reales de SPHEREx y las ordenamos en el tiempo.
+        </p>
       </div>
+
       <form
+        class="search-form"
         onsubmit={(event) => {
           event.preventDefault();
           void explore();
         }}
       >
-        <label for="preset">Empieza con un objeto</label>
-        <select
-          id="preset"
-          value={selectedPreset ? String(presets.indexOf(selectedPreset)) : ""}
-          onchange={(event) => selectPreset(event.currentTarget.value)}
-        >
-          <option value="" disabled>Coordenadas personalizadas</option>
-          {#each presets as preset, i}<option value={String(i)}
-              >{preset.name}</option
-            >{/each}
-        </select>
-        <p class="hint">
-          {selectedPreset?.detail ??
-            "Introduce coordenadas ICRS en grados decimales."}
-        </p>
-        <p class="hint">
-          Las coordenadas de referencia no se propagan a cada época. Usa un
-          campo amplio para objetos de alto movimiento propio, especialmente
-          Barnard.
-        </p>
-        <div class="coordinate-fields">
+        <div class="preset-chips" aria-label="Objetos de ejemplo">
+          {#each presets as preset, i}
+            <button
+              type="button"
+              class:active={selectedPreset === preset}
+              onclick={() => selectPreset(String(i))}
+            >
+              {preset.name}
+            </button>
+          {/each}
+        </div>
+
+        <div class="search-fields">
           <div>
-            <label for="ra">Ascensión recta <small>°</small></label><input
+            <label for="ra">Ascensión recta</label>
+            <input
               id="ra"
               type="number"
               min="0"
@@ -339,7 +625,8 @@
             />
           </div>
           <div>
-            <label for="dec">Declinación <small>°</small></label><input
+            <label for="dec">Declinación</label>
+            <input
               id="dec"
               type="number"
               min="-90"
@@ -349,45 +636,72 @@
               bind:value={query.dec}
             />
           </div>
+          <button type="submit" class="primary explore-button" disabled={busy}>
+            {busy ? "Consultando…" : "Explorar"} <span>→</span>
+          </button>
         </div>
-        <label for="fov">Campo de visión <span>{query.fov}′</span></label>
-        <input
-          id="fov"
-          type="range"
-          min="1"
-          max="30"
-          step="1"
-          bind:value={query.fov}
-        />
-        <div class="range-labels">
-          <span>1′ · detalle</span><span>30′ · contexto</span>
+
+        <div class="selected-object-note">
+          <span>{selectedPreset?.detail ?? "Coordenadas personalizadas"}</span>
         </div>
-        <label for="detector">Detector infrarrojo</label>
-        <select id="detector" bind:value={query.detector}>
-          {#each detectors as band, i}<option value={i + 1}
-              >D{i + 1} · {band}</option
-            >{/each}
-        </select>
-        <p class="hint">
-          Cada detector cubre varias longitudes de onda, no una banda fija.
-          Consulta la longitud central de cada imagen.
-        </p>
-        <button type="submit" class="primary" disabled={busy}
-          >Explorar región <span>→</span></button
-        >
-        {#if busy}<button type="button" class="secondary" onclick={cancel}
-            >Cancelar consulta</button
-          >{/if}
+
+        {#if queryDirty}
+          <div class="pending-query" role="status">
+            <span class="pending-dot"></span>
+            <div>
+              <strong>Cambios sin aplicar</strong>
+              <small>
+                El visor sigue mostrando la consulta anterior. Presiona
+                “Explorar” para usar esta nueva configuración.
+              </small>
+            </div>
+          </div>
+        {:else if activeQuery}
+          <div class="current-query">
+            <span class="current-dot"></span>
+            Configuración aplicada al visor
+          </div>
+        {/if}
+
+        {#if busy}
+          <button
+            type="button"
+            class="secondary cancel-button"
+            onclick={cancel}
+          >
+            Cancelar consulta
+          </button>
+        {/if}
+
+        <details class="advanced-search">
+          <summary>Opciones avanzadas · para explorar con más precisión</summary
+          >
+          <div class="advanced-grid">
+            <div>
+              <label for="fov">Campo de visión <span>{query.fov}′</span></label>
+              <input
+                id="fov"
+                type="range"
+                min="1"
+                max="30"
+                step="1"
+                bind:value={query.fov}
+              />
+              <div class="range-labels">
+                <span>1′ · detalle</span><span>30′ · contexto</span>
+              </div>
+            </div>
+            <div>
+              <label for="detector">Detector infrarrojo</label>
+              <select id="detector" bind:value={query.detector}>
+                {#each detectors as band, i}
+                  <option value={i + 1}>D{i + 1} · {band}</option>
+                {/each}
+              </select>
+            </div>
+          </div>
+        </details>
       </form>
-      <div class="source-note">
-        <span class="eyebrow">Fuente de datos</span><strong
-          >SPHEREx DR1 + QR3</strong
-        >
-        <p>
-          Observaciones individuales, no imágenes sintéticas. Hasta 12 recortes
-          por consulta, sobre una cuadrícula celeste común.
-        </p>
-      </div>
     </aside>
 
     <section class="workspace">
@@ -400,6 +714,11 @@
                 ? `${activeQuery.ra.toFixed(5)}°, ${activeQuery.dec.toFixed(5)}°`
                 : "Tu ventana al universo"}
             </h2>
+            {#if activeQuery}
+              <p class="active-query-meta">
+                Consulta actual · D{activeQuery.detector} · {activeQuery.fov}′
+              </p>
+            {/if}
           </div>
           <button
             class="secondary compact"
@@ -410,6 +729,99 @@
         <div class="status" role="status">
           <span class="live-dot"></span>{status}
         </div>
+        {#if busy || progressPhase === "ready" || progressPhase === "error"}
+          <div
+            class="query-progress"
+            class:is-error={progressPhase === "error"}
+            class:is-ready={progressPhase === "ready"}
+            class:is-partial={progressPhase === "partial"}
+          >
+            <div class="progress-copy">
+              <div>
+                <span class="progress-kicker">
+                  {progressPhase === "searching"
+                    ? "Buscando datos"
+                    : progressPhase === "loading"
+                      ? "Preparando imágenes"
+                      : progressPhase === "ready"
+                        ? "Consulta lista"
+                        : progressPhase === "partial"
+                          ? "Resultado parcial"
+                          : "Problema temporal"}
+                </span>
+                <strong>{progressLabel}</strong>
+              </div>
+              {#if progressPhase === "loading" || progressPhase === "ready" || progressPhase === "partial"}
+                <span class="progress-percent">{progress}%</span>
+              {/if}
+            </div>
+
+            <div
+              class="progress-track"
+              class:indeterminate={progressPhase === "searching"}
+              role="progressbar"
+              aria-label={progressLabel}
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={progressPhase === "searching"
+                ? undefined
+                : progress}
+            >
+              <span
+                class="progress-fill"
+                style={`width: ${progressPhase === "searching" ? 36 : progress}%`}
+              ></span>
+            </div>
+
+            <div class="progress-stages" aria-hidden="true">
+              <span class:active={progressPhase === "searching"}
+                >1 · Buscar</span
+              >
+              <span class:active={progressPhase === "loading"}
+                >2 · Preparar</span
+              >
+              <span
+                class:active={progressPhase === "ready" ||
+                  progressPhase === "partial"}>3 · Explorar</span
+              >
+            </div>
+
+            {#if retryAvailable}
+              <button
+                type="button"
+                class="retry-button"
+                onclick={() => void explore()}
+              >
+                Reintentar consulta ↻
+              </button>
+            {/if}
+          </div>
+        {/if}
+        <div class="observation-summary" aria-label="Resumen de la consulta">
+          <div>
+            <strong>{totalObservations}</strong>
+            <span>observaciones encontradas</span>
+          </div>
+          <div>
+            <strong>{frames.length}</strong>
+            <span>imágenes cargadas</span>
+          </div>
+          <div>
+            <strong>D{activeQuery?.detector ?? query.detector}</strong>
+            <span>detector</span>
+          </div>
+          <div>
+            <strong>{activeQuery?.fov ?? query.fov}′</strong>
+            <span>campo de visión</span>
+          </div>
+        </div>
+        {#if usingPreview && current && current.zodi_subtracted !== true}
+          <p class="notice legacy-preview">
+            Vista previa de respaldo antigua: sirve para demostrar navegación,
+            Blink y Overlay, pero todavía no incluye la nueva corrección IMAGE −
+            ZODI. Difference queda deshabilitado hasta regenerar esta caché.
+          </p>
+        {/if}
         {#if usingPreview}
           <p class="hint" data-testid="saved-preview">
             Vista previa guardada de Barnard · preparada el {previewSavedAt?.slice(
@@ -419,11 +831,24 @@
             consulta actualizada ni imágenes simuladas.
           </p>
         {/if}
-        <div class="sky-view" class:has-image={!!current}>
+        <div
+          class="sky-view"
+          class:has-image={!!current}
+          class:is-zoomed={zoom > 1}
+          class:is-dragging={dragging}
+          bind:this={skyContainer}
+          role="region"
+          aria-label="Visor astronómico interactivo"
+          onpointerdown={startPan}
+          onpointermove={movePan}
+          onpointerup={endPan}
+          onpointercancel={endPan}
+        >
           {#if current}
             <canvas
               bind:this={canvas}
               aria-label="Recorte astronómico alineado: norte arriba, este a la izquierda"
+              style={`transform: translate(${panX}px, ${panY}px) scale(${zoom})`}
             ></canvas>
             <span class="north">N ↑</span><span class="east">E ←</span>
             <div class="image-label">
@@ -435,22 +860,55 @@
                 2,
               )}″/px
             </div>
+            <div class="viewer-tools" aria-label="Controles del visor">
+              <button
+                type="button"
+                onclick={() => zoomBy(-0.25)}
+                disabled={zoom <= 1}
+                aria-label="Alejar">−</button
+              >
+              <span>{Math.round(zoom * 100)}%</span>
+              <button
+                type="button"
+                onclick={() => zoomBy(0.25)}
+                disabled={zoom >= 4}
+                aria-label="Acercar">+</button
+              >
+              <button
+                type="button"
+                onclick={resetZoom}
+                disabled={zoom === 1 && panX === 0 && panY === 0}
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                onclick={toggleFullscreen}
+                aria-label="Pantalla completa">⛶</button
+              >
+            </div>
           {:else}
             <div class="empty-state">
               <h3>
                 {busy
                   ? "Recuperando un fragmento del cielo"
-                  : "El siguiente hallazgo empieza mirando"}
+                  : progressPhase === "error"
+                    ? "IRSA no respondió esta vez"
+                    : "El siguiente hallazgo empieza mirando"}
               </h3>
               <p>
                 {busy
-                  ? "IRSA está preparando los archivos FITS. Cada imagen aparecerá en cuanto esté alineada y lista."
-                  : "Elige uno de los cinco objetos de referencia o introduce tus propias coordenadas."}
+                  ? "Estamos buscando observaciones y preparando los archivos FITS. Puedes seguir el avance arriba."
+                  : progressPhase === "error"
+                    ? "El servicio externo puede estar saturado. No significa que esta región no tenga datos; usa Reintentar cuando quieras."
+                    : "Elige uno de los cinco objetos de referencia o introduce tus propias coordenadas."}
               </p>
               <span class="badge"
                 >{busy
                   ? "DATOS REALES · PROCESANDO"
-                  : "SIN DATOS CARGADOS"}</span
+                  : progressPhase === "error"
+                    ? "SERVICIO TEMPORALMENTE NO DISPONIBLE"
+                    : "SIN DATOS CARGADOS"}</span
               >
             </div>
           {/if}
@@ -509,41 +967,95 @@
               "Última observación"}</span
           >
         </div>
+        {#if frames.length && totalObservations > frames.length}
+          <div class="sampling-note">
+            <span>Serie temporal muestreada</span>
+            <strong>{frames.length} imágenes visibles</strong>
+            <p>
+              Se encontraron {totalObservations} observaciones para esta región y
+              detector. El visor usa una muestra distribuida en el tiempo; no representa
+              todas las observaciones disponibles.
+            </p>
+          </div>
+        {/if}
       </div>
 
       <div class="panel analysis-panel">
-        <span class="eyebrow">Comparar imágenes</span>
-        <div class="analysis-controls">
+        <div class="analysis-heading">
           <div>
-            <label for="mode">Visualización</label><select
-              id="mode"
-              value={mode}
-              onchange={(event) => changeMode(event.currentTarget.value)}
-              disabled={!frames.length}
-              ><option value="image">Serie temporal</option><option
-                value="blink"
-                disabled={frames.length < 2}>Alternar A/B</option
-              ><option value="overlay" disabled={frames.length < 2}
-                >Superponer · A rojo / B cian</option
-              ><option value="difference" disabled={frames.length < 2}
-                >Diferencia · A − B</option
-              ></select
-            >
+            <span class="eyebrow">Herramientas de comparación</span>
+            <h3>Compara cómo cambia esta región</h3>
           </div>
-          <div>
-            <label for="reference">Referencia B</label><select
-              id="reference"
-              bind:value={referenceIndex}
-              disabled={frames.length < 2}
-              >{#each observations as item, i}<option value={i}
-                  >{i + 1} · {item.date.slice(0, 10)}
-                  {item.date.slice(11, 19)}</option
-                >{/each}</select
+          <span class="analysis-badge">SPHEREx real</span>
+        </div>
+
+        <div class="mode-buttons" aria-label="Modo de visualización">
+          <button
+            class:active={mode === "image"}
+            onclick={() => changeMode("image")}
+            disabled={!frames.length}
+          >
+            <strong>Normal</strong>
+            <span>Recorre las épocas</span>
+          </button>
+          <button
+            class:active={mode === "blink"}
+            onclick={() => changeMode("blink")}
+            disabled={frames.length < 2}
+          >
+            <strong>Blink</strong>
+            <span>Alterna A / B</span>
+          </button>
+          <button
+            class:active={mode === "overlay"}
+            onclick={() => changeMode("overlay")}
+            disabled={frames.length < 2}
+          >
+            <strong>Overlay</strong>
+            <span>Rojo / cian</span>
+          </button>
+          <button
+            class:active={mode === "difference"}
+            onclick={() => changeMode("difference")}
+            disabled={frames.length < 2}
+          >
+            <strong>Diferencia</strong>
+            <span
+              >{hasCompatibleReference
+                ? "Par compatible disponible"
+                : "Exploración visual"}</span
             >
-          </div>
+          </button>
+        </div>
+
+        <div class="analysis-settings">
+          {#if mode !== "image"}
+            <div>
+              <label for="reference">Observación de referencia B</label>
+              <select
+                id="reference"
+                bind:value={referenceIndex}
+                disabled={frames.length < 2}
+              >
+                {#each observations as item, i}
+                  <option value={i} disabled={i === index}>
+                    {i + 1} · {item.date.slice(0, 10)} · {frames[
+                      i
+                    ]?.wavelength_um?.toFixed(3) ?? "?"} μm
+                    {i !== index &&
+                    spectrallyCompatible(frames[index], frames[i])
+                      ? " · compatible"
+                      : i === index
+                        ? " · imagen A"
+                        : " · exploratoria"}
+                  </option>
+                {/each}
+              </select>
+            </div>
+          {/if}
           <div>
-            <label for="contrast">Contraste <span>{contrast}</span></label
-            ><input
+            <label for="contrast">Contraste <span>{contrast}</span></label>
+            <input
               id="contrast"
               type="range"
               min="1"
@@ -552,53 +1064,143 @@
             />
           </div>
         </div>
-        <label class="checkbox"
-          ><input type="checkbox" bind:checked={hideFlags} /> Ocultar píxeles con
-          cualquier bandera de calidad</label
-        >
-        <p class="hint">
-          Algunas banderas son informativas: un píxel marcado no es
-          necesariamente inválido. Ocultarlas todas puede dejar el visor vacío.
-        </p>
+
+        <label class="quality-toggle">
+          <input type="checkbox" bind:checked={hideFlags} />
+          <span>
+            <strong>Ocultar píxeles con calidad baja</strong>
+            <small>
+              Las banderas de SPHEREx también pueden ser informativas; un píxel
+              marcado no significa automáticamente que sea inválido.
+            </small>
+          </span>
+        </label>
+
         {#if current}
-          <div class="metadata">
-            <span
-              >λ central <strong
-                >{current.wavelength_um?.toFixed(3) ?? "No disponible"} μm</strong
-              ></span
-            ><span>Brillo <strong>{current.unit}</strong></span><span
-              >Cobertura <strong>{(current.coverage * 100).toFixed(1)}%</strong
-              ></span
-            ><span
-              >Con banderas <strong
-                >{(current.flagged_fraction * 100).toFixed(1)}%</strong
-              ></span
-            ><a href={observation.source_url} target="_blank" rel="noreferrer"
-              >FITS original ↗</a
+          <div class="metadata-cards">
+            <div
+              title="Longitud de onda central de esta observación infrarroja."
             >
+              <span>λ central · ?</span>
+              <strong>{current.wavelength_um?.toFixed(3) ?? "—"} μm</strong>
+            </div>
+            <div
+              title="Porcentaje del recorte solicitado que contiene datos válidos."
+            >
+              <span>Cobertura · ?</span>
+              <strong>{(current.coverage * 100).toFixed(1)}%</strong>
+            </div>
+            <div
+              title="Porcentaje de píxeles con flags que el procesamiento oficial de mosaicos considera problemáticos. SOURCE no se cuenta como píxel malo."
+            >
+              <span>Píxeles con calidad baja · ?</span>
+              <strong>{(current.flagged_fraction * 100).toFixed(1)}%</strong>
+            </div>
+            <div
+              title="Unidad física usada para representar el brillo superficial en la imagen."
+            >
+              <span>Procesamiento · ?</span>
+              <strong
+                >{current.zodi_subtracted === true
+                  ? "IMAGE − ZODI"
+                  : "IMAGE"}</strong
+              >
+            </div>
+          </div>
+
+          <a
+            class="fits-link"
+            href={observation.source_url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Ver archivo FITS original ↗
+          </a>
+        {/if}
+
+        {#if mode !== "image" && frames.length > 1}
+          <div
+            class="comparison-card"
+            class:comparison-warning={!comparisonCompatible}
+          >
+            <span>Comparando A / B</span>
+            <strong>
+              A · {observations[index]?.date.slice(0, 10)} · {current?.wavelength_um?.toFixed(
+                3,
+              ) ?? "?"} μm
+              <br />
+              B · {observations[referenceIndex]?.date.slice(0, 10)} · {referenceFrame?.wavelength_um?.toFixed(
+                3,
+              ) ?? "?"} μm
+            </strong>
+
+            {#if comparisonCompatible}
+              <div class="compatibility-ok">
+                ✓ Longitudes de onda compatibles para comparación
+              </div>
+            {:else}
+              <div class="compatibility-warning">
+                ⚠ Diferencia espectral de {wavelengthDelta?.toFixed(3) ?? "?"} μm.
+                Un cambio visual puede deberse al color/espectro del objeto y no al
+                tiempo.
+              </div>
+            {/if}
+
+            {#if mode === "difference"}
+              <div
+                class="difference-grade"
+                class:science-grade={differenceScienceReady}
+                class:exploratory-grade={!differenceScienceReady}
+              >
+                <strong>
+                  {differenceScienceReady
+                    ? "Comparación científicamente compatible"
+                    : "Diferencia visual exploratoria"}
+                </strong>
+                <span>
+                  {differenceScienceReady
+                    ? "A y B tienen longitudes de onda compatibles, IMAGE − ZODI y máscara de calidad."
+                    : "Puedes inspeccionarla, pero no debe interpretarse como variabilidad temporal confirmada."}
+                </span>
+              </div>
+            {/if}
+
+            <p>
+              {mode === "blink"
+                ? "Blink alterna las dos épocas para inspección visual."
+                : mode === "difference"
+                  ? "El mapa A − B resalta cambios visuales. El análisis automático futuro solo usará pares científicamente compatibles."
+                  : "Overlay usa rojo para A y cian para B. Si las longitudes de onda no coinciden, úsalo solo como inspección visual."}
+            </p>
           </div>
         {/if}
-        <p class="hint">
-          Escala de brillo común a la serie. Fondo zodiacal sin sustraer. Las
-          diferencias también pueden deberse a longitud de onda, PSF, ruido o
-          contaminación: no confirman movimiento ni variabilidad.
-        </p>
-        {#if mode !== "image" && frames.length > 1}
-          <p class="comparison-note">
-            A: {observations[index]?.date.slice(0, 10)} · {frames[
-              index
-            ]?.wavelength_um?.toFixed(3) ?? "?"} μm — B: {observations[
-              referenceIndex
-            ]?.date.slice(0, 10)} · {frames[
-              referenceIndex
-            ]?.wavelength_um?.toFixed(3) ?? "?"} μm. {index === referenceIndex
-              ? "A y B son la misma observación."
-              : ""}
-            {mode === "blink" ? "Pulsa reproducir para alternar." : ""}
+
+        <div class="science-note">
+          <strong>¿Qué estamos buscando?</strong>
+          <p>
+            Fuentes que cambien de posición o brillo entre observaciones. El
+            análisis automático de candidatos se conectará a este visor sin
+            reemplazar la revisión humana.
           </p>
-        {/if}
+        </div>
       </div>
       {#each warnings as warning}<p class="notice">{warning}</p>{/each}
+      {#if frameIssues.length && frames.length < DISPLAY_FRAME_LIMIT}
+        <details class="partial-details">
+          <summary>
+            {frameIssues.length} observación{frameIssues.length === 1
+              ? ""
+              : "es"} no pudo{frameIssues.length === 1 ? "" : "ieron"} descargarse
+          </summary>
+          <p>
+            El visor utilizó las observaciones que sí estuvieron disponibles.
+            Puedes reintentar la consulta más tarde.
+          </p>
+          <ul>
+            {#each frameIssues as issue}<li>{issue}</li>{/each}
+          </ul>
+        </details>
+      {/if}
       {#if errors.length}<div class="error-box" role="alert">
           <strong>No se completaron algunas operaciones</strong
           >{#each errors as error}<p>{error}</p>{/each}

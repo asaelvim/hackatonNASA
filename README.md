@@ -3,168 +3,440 @@
 Desarrollado por el **equipo Otarios**, del **Instituto Tecnológico de La Paz**,
 para NASA Space Apps Challenge.
 
-Visor público de observaciones reales de SPHEREx: **Svelte + TypeScript + Vite**
-para los controles, **Canvas** para las imágenes y **FastAPI + Astropy + NumPy +
-SciPy** para consultar NASA/IPAC IRSA y alinear recortes FITS.
+SPHEREx Explorer es una herramienta web de astronomía ciudadana para consultar
+observaciones reales de **SPHEREx** desde NASA/IPAC IRSA, construir una serie
+temporal de una región del cielo y comparar cómo cambia entre distintas épocas.
 
-## Ejecutar
+El proyecto está diseñado para que una persona sin experiencia astronómica pueda
+explorar el cielo mediante objetos de ejemplo o coordenadas, sin ocultar la
+información científica necesaria para interpretar correctamente las imágenes.
 
-Necesitas Node.js 22.12 o posterior, [uv](https://docs.astral.sh/uv/) y acceso a
-internet para consultar IRSA.
+---
+
+## Estado actual
+
+El núcleo del explorador temporal está funcional y validado.
+
+Incluye:
+
+- Consulta de observaciones reales desde **SPHEREx DR1 y QR3**.
+- Búsqueda por **ascensión recta y declinación**.
+- Cinco objetos de referencia precargados.
+- Selección de detector infrarrojo D1–D6.
+- Campo de visión configurable entre 1′ y 30′.
+- Hasta **12 imágenes visibles** distribuidas a lo largo del intervalo temporal.
+- Pool interno de observaciones de respaldo para resistir fallos individuales.
+- Reproyección WCS a una cuadrícula común.
+- Norte arriba y este a la izquierda.
+- Procesamiento **IMAGE − ZODI**.
+- Máscara de calidad basada en flags problemáticos de SPHEREx.
+- Timeline y reproducción automática.
+- Modos **Normal**, **Blink**, **Overlay** y **Difference**.
+- Validación de compatibilidad espectral entre imágenes A/B.
+- Diferencia científica cuando el par es compatible.
+- Diferencia visual exploratoria cuando no lo es.
+- Contraste interactivo.
+- Zoom de 100% a 400%.
+- Pan con mouse o pantalla táctil.
+- Reset y pantalla completa.
+- Barra de progreso por etapas.
+- Manejo de resultados completos, parciales y fallos de IRSA.
+- Conservación de la última vista válida cuando una nueva consulta falla.
+- Compartir consultas mediante URL.
+- Enlace directo al FITS original de IRSA.
+
+---
+
+## Arquitectura
+
+### Frontend
+
+- **Svelte 5**
+- **TypeScript**
+- **Vite**
+- **Canvas API**
+
+El frontend controla la búsqueda, reproducción temporal, comparación de imágenes,
+zoom, navegación y presentación de metadatos.
+
+### Backend
+
+- **FastAPI**
+- **Astropy**
+- **NumPy**
+- **SciPy**
+- **HTTPX**
+
+El backend consulta NASA/IPAC IRSA, descarga archivos FITS, aplica el procesamiento
+científico y alinea las observaciones antes de enviarlas al navegador.
+
+---
+
+## Flujo de una consulta
+
+```text
+RA + Dec + detector + campo de visión
+                ↓
+       NASA/IPAC IRSA
+          DR1 + QR3
+                ↓
+      observaciones encontradas
+                ↓
+   selección temporal + respaldos
+                ↓
+          descarga FITS
+                ↓
+         IMAGE − ZODI
+                ↓
+      máscara de calidad SPHEREx
+                ↓
+        reproyección WCS
+                ↓
+      cuadrícula temporal común
+                ↓
+       hasta 12 imágenes visibles
+                ↓
+ Normal / Blink / Overlay / Difference
+```
+
+DR1 y QR3 se consultan de forma independiente. Si una colección falla pero la otra
+responde, la aplicación continúa utilizando los datos disponibles.
+
+---
+
+## Procesamiento científico
+
+### IMAGE − ZODI
+
+Las imágenes utilizadas por el visor restan el modelo de luz zodiacal cuando el
+archivo FITS contiene la extensión `ZODI`:
+
+```text
+imagen procesada = IMAGE − ZODI
+```
+
+Esto reduce cambios de fondo que podrían confundirse con variabilidad real.
+
+### Máscara de calidad
+
+La extensión `FLAGS` es una máscara de bits y **no se interpola como una imagen de
+brillo**.
+
+Los flags problemáticos se reproyectan mediante nearest-neighbor. Flags
+informativos como `SOURCE` no se consideran automáticamente píxeles inválidos.
+
+El porcentaje mostrado como **Píxeles con calidad baja** representa solo los flags
+que el procesamiento considera problemáticos.
+
+### Comparación espectral
+
+Un detector SPHEREx no representa una única longitud de onda. Por ello, dos
+observaciones del mismo detector no necesariamente son comparables directamente.
+
+El visor muestra la longitud de onda central de cada imagen.
+
+En modos A/B:
+
+- Si las longitudes de onda son compatibles, el visor marca la comparación como
+  **científicamente compatible**.
+- Si no lo son, Difference sigue disponible como herramienta visual, pero se marca
+  como **diferencia visual exploratoria**.
+
+Una diferencia visual por sí sola **no representa una detección confirmada**.
+
+---
+
+## Muestreo temporal
+
+Una región puede contener decenas de observaciones.
+
+Por rendimiento, el backend obtiene un conjunto temporal de candidatos y el
+frontend muestra hasta **12 imágenes distribuidas a través del intervalo disponible**.
+
+Ejemplo:
+
+```text
+60 observaciones encontradas
+        ↓
+pool temporal de respaldo
+        ↓
+12 imágenes visibles
+```
+
+Si una observación del pool falla pero aun así se obtienen las 12 imágenes
+requeridas, el usuario recibe una consulta completa.
+
+Si no se consiguen las 12, la aplicación muestra un resultado parcial sin descartar
+las imágenes que sí pudieron cargarse.
+
+La serie visible es una muestra temporal y no representa necesariamente todas las
+exposiciones disponibles en IRSA.
+
+---
+
+## Resiliencia ante IRSA
+
+IRSA es un servicio externo y puede devolver timeouts o errores 5xx.
+
+SPHEREx Explorer implementa:
+
+- reintentos ante fallos transitorios;
+- timeout independiente para búsquedas de catálogo;
+- tolerancia a fallos independientes entre DR1 y QR3;
+- pool de observaciones de respaldo;
+- carga progresiva;
+- conservación de la última consulta válida;
+- botón de reintento;
+- distinción entre consulta completa, parcial y fallo total.
+
+Un timeout de IRSA no se interpreta como ausencia de datos astronómicos.
+
+---
+
+## Ejecutar el proyecto
+
+### Requisitos
+
+- Node.js 22.12 o posterior
+- `uv`
+- Python 3.12 o posterior
+- Acceso a internet para consultar IRSA
+
+Instala dependencias:
 
 ```bash
 npm ci
 uv sync --project backend --python 3.13
 ```
 
-En una terminal, inicia la API:
+### Backend
+
+En una terminal:
 
 ```bash
 uv run --project backend uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 
-En otra, inicia el frontend:
+### Frontend
+
+En otra terminal:
 
 ```bash
 npm run dev
 ```
 
-Abre la URL que indica Vite, normalmente `http://localhost:5173`.
-El frontend utiliza `/api`; Vite dirige esas peticiones a la API local.
+Abre la URL mostrada por Vite, normalmente:
 
-Para servir la versión compilada desde FastAPI, sin servidor Vite:
+```text
+http://localhost:5173
+```
+
+---
+
+## Build de producción
 
 ```bash
 npm run build
+```
+
+Para servir el frontend compilado desde FastAPI:
+
+```bash
 uv run --project backend uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 
-Abre `http://127.0.0.1:8000`. Esta configuración es local; antes de exponerla
-públicamente hacen falta HTTPS, límites de solicitudes y de trabajos concurrentes,
-y una política de caché para las descargas.
-
-## Explorar
-
-Al abrir la región inicial de Barnard se muestran dos observaciones reales
-guardadas con la aplicación, sin esperar ninguna respuesta de IRSA. Se identifican
-como **vista previa guardada**, con las fechas originales y los enlaces FITS de
-procedencia. En paralelo se consulta el archivo; la primera imagen nueva reemplaza
-la vista previa y las demás aparecen conforme están listas.
-
-Para otras coordenadas, campos de visión o detectores, la primera imagen depende
-de IRSA: no se muestra la vista de Barnard como si perteneciera a otra región.
-Con dos imágenes comienza la reproducción automática, salvo que el navegador
-indique movimiento reducido o que el usuario haya pausado la reproducción.
-Si IRSA falla, se muestra el error y, cuando existe, permanece la vista previa
-real claramente etiquetada; no se sustituye la respuesta por una animación sintética.
-
-Selecciona Barnard, Epsilon Indi B, WISE 0855, RW Aurigae o R Draconis, o introduce
-ascensión recta y declinación ICRS **en grados decimales**. El campo de visión
-abarca entre 1 y 30 minutos de arco; los ejemplos comienzan con 12′ para dejar
-margen al movimiento respecto de las coordenadas de referencia.
-
-Pulsa **Explorar región**. La API consulta las colecciones Wide Survey
-`spherex_dr1` y `spherex_qr3`, conserva las fechas de las exposiciones, selecciona
-el detector y descarga hasta 12 recortes distribuidos sobre el intervalo
-encontrado. No utiliza el cubo combinado del cielo para simular épocas.
-Las consultas truncadas y las imágenes que no pudieron cargarse se notifican.
-Puedes cancelar la descarga sin perder las imágenes ya cargadas.
-
-Las imágenes se reproyectan con WCS e interpolación bilineal a una cuadrícula TAN
-común, con norte arriba, este a la izquierda y escala próxima a 6.2″/píxel. Los
-valores de brillo se transmiten como float32 little-endian codificado en base64,
-con compresión HTTP. Canvas aplica un contraste común a la serie, sin normalizar
-cada exposición por separado.
-
-Puedes reproducir la serie, seleccionar fechas, alternar A/B, superponer A en rojo
-y B en cian o visualizar A − B (positivo en rojo, negativo en azul).
-**Compartir** copia la región con coordenadas, detector y campo de visión:
+Después abre:
 
 ```text
-http://localhost:5173/?ra=269.452083&dec=4.693364&fov=12&detector=1
+http://127.0.0.1:8000
 ```
 
-El enlace vuelve a consultar el archivo; no conserva una selección inmutable de
-observaciones, contraste o modo de comparación.
+---
 
-## Límites científicos del MVP
+## Controles principales
 
-- Un detector **no equivale a una única banda espectral**. Los filtros varían con
-  la posición en el detector. Se muestra la longitud de onda central en las
-  coordenadas consultadas para cada exposición; no describe todo el recorte.
-- El fondo zodiacal de `IMAGE` no se sustrae. Las diferencias no corrigen PSF,
-  respuesta espectral o ruido, ni incluyen significancia estadística. Son una
-  ayuda visual, **no una detección confirmada** ni una curva de luminosidad.
-- Los píxeles sin cobertura se muestran oscuros, no como mediciones de brillo
-  cero. La máscara opcional excluye cualquier píxel de entrada con banderas que
-  contribuya a la interpolación; algunas banderas son informativas. El porcentaje
-  marcado se calcula entre los píxeles de salida con datos finitos.
-- Las coordenadas de los ejemplos son referencias, no posiciones propagadas a
-  la fecha de cada exposición. Barnard requiere un campo amplio. No hay todavía
-  corrección de movimiento propio, fotometría subpíxel o apilado por trayectoria.
-- Epsilon Indi B no se resuelve como dos componentes en este visor. Recuperar
-  una región de WISE 0855 tampoco demuestra que la fuente sea detectable.
-- El MVP no incluye búsqueda por nombre libre, Gaia/WISE, espectros, anotaciones
-  ni exportación de vídeo. Los cinco nombres disponibles son ejemplos precargados.
+### Explorar
 
-IRSA se consulta de nuevo en cada búsqueda, sin fijar una lista local de imágenes.
-Los recortes preparados tienen una caché de hasta 16 entradas por proceso.
-La vista previa local es una muestra de dos exposiciones, no un archivo completo
-ni una garantía de descubrimiento. Para regenerarla con datos del archivo y
-volver a compilar el frontend:
+Puedes seleccionar:
+
+- Estrella de Barnard
+- Epsilon Indi B
+- WISE 0855−0714
+- RW Aurigae
+- R Draconis
+
+o introducir coordenadas ICRS en grados decimales.
+
+### Normal
+
+Recorre cronológicamente las imágenes disponibles.
+
+### Blink
+
+Alterna rápidamente dos épocas para detectar cambios visuales.
+
+### Overlay
+
+Superpone la observación A y B usando rojo/cian.
+
+### Difference
+
+Calcula una representación visual A − B.
+
+El visor indica si la comparación es científicamente compatible o únicamente
+exploratoria.
+
+### Zoom y navegación
+
+- Zoom: 100%–400%
+- Pan con mouse o pantalla táctil
+- Reset
+- Pantalla completa
+
+---
+
+## Verificación del núcleo
+
+El estado actual fue comprobado con:
+
+### Backend
 
 ```bash
-PYTHONPATH=backend uv run --project backend python backend/scripts/cache_preview.py
-npm run build
+uv run --project backend pytest backend/tests
 ```
 
-Las descargas tienen límites de tamaño y hasta tres intentos ante fallos
-transitorios; los errores definitivos se muestran, nunca se sustituyen por datos
-sintéticos.
+Resultado esperado actualmente:
 
-## Verificación
+```text
+16 passed
+```
+
+### Svelte y TypeScript
 
 ```bash
 npm run check
-npm test
-npm run format:check
-npm run build
-uv run --project backend pytest -q backend/tests
-uv run --project backend ruff check backend
-uv run --project backend ruff format --check backend
 ```
 
-Las pruebas de navegador usan respuestas sintéticas **solo dentro de los tests**,
-para comprobar reproducción, Canvas, comparación, errores y cancelación sin
-depender del servicio remoto:
+Resultado esperado:
+
+```text
+0 errors and 0 warnings
+```
+
+### Pruebas unitarias del frontend
 
 ```bash
-npx playwright install chromium
+npm test
+```
+
+Resultado esperado actualmente:
+
+```text
+14 passed
+```
+
+### Formato
+
+```bash
+npm run format:check
+```
+
+### Build
+
+```bash
+npm run build
+```
+
+También existen pruebas end-to-end con Playwright:
+
+```bash
 npm run test:e2e
 ```
 
-Si ya tienes Chromium instalado:
+---
+
+## Vista previa local
+
+El repositorio incluye una vista previa guardada para evitar depender completamente
+de IRSA durante una demostración.
+
+Puede regenerarse con:
 
 ```bash
-CHROMIUM_PATH=/usr/bin/chromium npm run test:e2e
+PYTHONPATH=backend uv run --project backend python backend/scripts/cache_preview.py
 ```
 
-Para comprobar el acceso real a las cinco regiones y preparar dos épocas de cada
-una (requiere internet y puede tardar):
+Después:
 
 ```bash
-PYTHONPATH=backend uv run --project backend python backend/scripts/check_irsa.py
+npm run build
 ```
 
-Esta comprobación se ejecutó con éxito en noviembre de 2026; verifica recuperación
-y reproyección de datos, no el movimiento o la variabilidad de las fuentes.
+La vista previa debe regenerarse cuando cambie el procesamiento científico del
+backend.
+
+---
+
+## Limitaciones actuales
+
+SPHEREx Explorer todavía no realiza automáticamente:
+
+- detección de fuentes;
+- seguimiento de una fuente entre épocas;
+- medición automática de desplazamiento angular;
+- curvas de brillo;
+- identificación automática de objetos;
+- Candidate Score;
+- ranking de candidatos;
+- clasificación mediante inteligencia artificial;
+- confirmación de descubrimientos.
+
+Los modos Blink, Overlay y Difference son herramientas de inspección.
+
+Una detección futura deberá utilizar únicamente pares y observaciones que cumplan
+los criterios científicos apropiados.
+
+---
+
+## Próxima etapa
+
+Sobre este núcleo se construirá el sistema de descubrimiento:
+
+```text
+detección de fuentes
+        ↓
+asociación entre épocas
+        ↓
+desplazamiento + variabilidad
+        ↓
+filtros de calidad
+        ↓
+Candidate Score
+        ↓
+Candidate Queue
+        ↓
+revisión humana
+```
+
+El objetivo es convertir el visor temporal en una herramienta que ayude a localizar
+automáticamente fuentes interesantes dentro de las observaciones de SPHEREx.
+
+---
 
 ## Recursos
 
-- [Archivo SPHEREx en IRSA](https://irsa.ipac.caltech.edu/Missions/spherex.html)
-- [Acceso SIA2 y recortes FITS](https://irsa.ipac.caltech.edu/spherex-archive-documentation/spherex-data-access/)
-- [Productos, detectores y limitaciones](https://irsa.ipac.caltech.edu/spherex-archive-documentation/spherex-data-products/)
-- [Tutoriales oficiales](https://caltech-ipac.github.io/irsa-tutorials/spherex/)
+- NASA/IPAC IRSA — SPHEREx Archive
+- SPHEREx Explanatory Supplement
+- SPHEREx Data Access Documentation
+- SPHEREx Data Products Documentation
+- SPHEREx tutorials from Caltech/IPAC
 
-Proyecto independiente para NASA Space Apps Challenge; no es una aplicación
-oficial de NASA. `IRSA_colab.ipynb` es el notebook existente y se conserva intacto.
+---
+
+## Equipo
+
+**Equipo Otarios**  
+Instituto Tecnológico de La Paz  
+NASA Space Apps Challenge
+
+Proyecto independiente. No es una aplicación oficial de NASA o JPL-Caltech.

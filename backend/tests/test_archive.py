@@ -20,7 +20,7 @@ URL = (
 )
 
 
-def synthetic_fits(shift=0, all_invalid=False):
+def synthetic_fits(shift=0, all_invalid=False, zodi_level=0.0):
     wcs, size = archive.output_grid(20, 30, 2)
     wcs.wcs.crpix += [shift, 0]
     header = wcs.to_header()
@@ -36,13 +36,18 @@ def synthetic_fits(shift=0, all_invalid=False):
     data = np.exp(-((x - center - shift) ** 2 + (y - center) ** 2) / 8)
     if all_invalid:
         data[:] = np.nan
-    flags = np.zeros_like(data, dtype=np.int32)
-    flags[size // 2, size // 2 + shift] = 1
+    flags = np.zeros_like(data, dtype=np.int64)
+    # TRANSIENT is a bad-pixel flag and must be masked.
+    flags[size // 2, size // 2 + shift] = 1 << 0
+    # SOURCE is informative and must not be treated as a generic bad pixel.
+    flags[size // 2 + 1, size // 2 + shift] = 1 << 21
+    zodi = np.full_like(data, zodi_level, dtype=np.float64)
     hdus = fits.HDUList(
         [
             fits.PrimaryHDU(),
             fits.ImageHDU(data, header=header, name="IMAGE"),
             fits.ImageHDU(flags, name="FLAGS"),
+            fits.ImageHDU(zodi, name="ZODI"),
         ]
     )
     content = io.BytesIO()
@@ -68,6 +73,26 @@ def test_invalid_cutout_is_an_error():
         archive.prepare_frame(synthetic_fits(all_invalid=True), 20, 30, 2)
 
 
+def test_prepare_frame_subtracts_zodiacal_light():
+    plain = archive.prepare_frame(synthetic_fits(zodi_level=0.0), 20, 30, 2)
+    corrected = archive.prepare_frame(synthetic_fits(zodi_level=0.1), 20, 30, 2)
+    a = np.frombuffer(base64.b64decode(plain["pixels"]), dtype="<f4")
+    b = np.frombuffer(base64.b64decode(corrected["pixels"]), dtype="<f4")
+    valid = np.isfinite(a) & np.isfinite(b)
+    np.testing.assert_allclose(a[valid] - b[valid], 0.1, atol=1e-5)
+    assert corrected["zodi_subtracted"] is True
+
+
+def test_quality_mask_does_not_treat_source_flag_as_bad_pixel():
+    frame = archive.prepare_frame(synthetic_fits(), 20, 30, 2)
+    quality = np.frombuffer(base64.b64decode(frame["flags"]), dtype=np.uint8)
+    # Only the explicit TRANSIENT pixel should enter the generic bad-pixel mask;
+    # SOURCE is reported separately.
+    assert quality.sum() < 4
+    assert frame["flagged_fraction"] < 0.05
+    assert frame["source_fraction"] > 0
+
+
 def test_query_uses_column_names_instead_of_votable_ids(monkeypatch):
     table = from_table(
         Table(
@@ -82,7 +107,7 @@ def test_query_uses_column_names_instead_of_votable_ids(monkeypatch):
         field.ID = f"col_{index}"
     content = io.BytesIO()
     writeto(table, content)
-    monkeypatch.setattr(archive, "download", lambda *args: content.getvalue())
+    monkeypatch.setattr(archive, "download", lambda *args, **kwargs: content.getvalue())
     observations, truncated = archive.query_collection("spherex_dr1", 20, 30)
     assert observations[0]["source_url"] == URL
     assert observations[0]["detector"] == 1
@@ -101,6 +126,36 @@ def test_search_samples_full_time_range_and_filters_detector(monkeypatch):
     assert [row["mjd"] for row in result["observations"]] == [0, 4, 9]
     assert result["total"] == 10
     assert len(result["warnings"]) == 3
+
+
+def test_search_keeps_working_when_one_collection_fails(monkeypatch):
+    rows = [
+        {"id": "ok", "mjd": 1.0, "detector": 1},
+        {"id": "other-detector", "mjd": 2.0, "detector": 2},
+    ]
+
+    def query(collection, *args):
+        if collection == "spherex_dr1":
+            raise httpx.ReadTimeout("Timed out")
+        return rows, False
+
+    monkeypatch.setattr(archive, "query_collection", query)
+    result = archive.search(20, 30, 1, 12)
+
+    assert [row["id"] for row in result["observations"]] == ["ok"]
+    assert result["total"] == 1
+    assert result["collections"] == ["spherex_qr3"]
+    assert any("spherex_dr1" in warning for warning in result["warnings"])
+
+
+def test_search_still_fails_when_all_collections_fail(monkeypatch):
+    def query(*args):
+        raise httpx.ReadTimeout("Timed out")
+
+    monkeypatch.setattr(archive, "query_collection", query)
+
+    with pytest.raises(httpx.ReadTimeout):
+        archive.search(20, 30, 1, 12)
 
 
 @pytest.mark.parametrize(
