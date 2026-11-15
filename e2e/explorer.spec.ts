@@ -117,3 +117,17 @@ test("cancelar una consulta devuelve el control sin crear una serie", async ({
   ).toBeEnabled();
   await expect(page.locator("canvas")).toHaveCount(0);
 });
+
+test("los controles no desbordan la pantalla en móviles estrechos", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 900 });
+  await page.goto("/");
+  await expect(
+    page.getByRole("button", { name: "Explorar región" }),
+  ).toBeVisible();
+  const overflows = await page.evaluate(
+    () => document.documentElement.scrollWidth > window.innerWidth,
+  );
+  expect(overflows).toBe(false);
+});
