@@ -1,6 +1,6 @@
 import type { Frame } from "./api";
 
-export type Mode = "image" | "blink" | "overlay" | "difference";
+export type Mode = "image" | "blink" | "overlay" | "difference" | "anomaly";
 
 export function sharedRange(
   frames: Frame[],
@@ -25,6 +25,7 @@ export function renderPixels(
   range: [number, number],
   contrast: number,
   hideFlags: boolean,
+  anomalyMask?: Uint8Array,
 ): Uint8ClampedArray {
   const result = new Uint8ClampedArray(current.pixels.length * 4);
   const [low, high] = range;
@@ -65,6 +66,8 @@ export function renderPixels(
         [stretch(a) * 255, stretch(b) * 255, stretch(b) * 255, 255],
         offset,
       );
+    } else if (mode === "anomaly" && anomalyMask?.[i]) {
+      result.set([255, 202, 80, 255], offset);
     } else {
       const value = stretch(a) * 255;
       result.set([value, value, value, 255], offset);

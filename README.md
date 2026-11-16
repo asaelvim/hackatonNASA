@@ -80,17 +80,21 @@ valores de brillo se transmiten como float32 little-endian codificado en base64,
 con compresión HTTP. Canvas aplica un contraste común a la serie, sin normalizar
 cada exposición por separado.
 
-Puedes reproducir la serie, seleccionar fechas, alternar A/B, superponer A en rojo
-y B en cian o visualizar A − B (positivo en rojo, negativo en azul).
-Por defecto se muestra un visor. El botón **Dos visores** activa un segundo
-panel; cada visor tiene su propio selector de modo. La reproducción, el contraste,
+Puedes reproducir la serie, seleccionar fechas, alternar imágenes, superponer la
+imagen actual en rojo y la referencia en cian o visualizar su diferencia
+(actual menos referencia: positivo en rojo, negativo en azul).
+Por defecto se muestra un visor. El icono de doble visor, en la esquina superior
+derecha del encabezado de **Visor 1**, activa un segundo panel; cada visor tiene
+su propio selector de modo. La reproducción, el contraste,
 el zoom y el desplazamiento son compartidos. En móviles se apilan verticalmente.
 Los controles de reproducción, avance y retroceso están centrados debajo de la
 línea de tiempo, con el contador de frames a la izquierda y la velocidad a la derecha.
-Cada visor tiene su propia referencia B, inicialmente la segunda observación.
-El selector **Frame B** aparece junto al modo de ese visor solamente al alternar
-A/B, superponer o mostrar diferencias. **A → B** usa la observación A actual como
-referencia de ese visor.
+Cada visor tiene su propia referencia, inicialmente la segunda observación.
+El selector **Referencia** aparece junto al modo de ese visor solamente al alternar
+imágenes, superponer o mostrar diferencias. **Usar imagen actual** selecciona la
+observación actual de la línea de tiempo como referencia de ese visor.
+El botón **?** del encabezado permite consultar una explicación breve del modo de
+comparación sin mantener más texto visible sobre las imágenes.
 Al pasar el cursor sobre una imagen, las etiquetas de fecha, orientación, escala
 y notas desaparecen de ambos visores. Solo las imágenes conservan su brillo;
 el resto de la interfaz, incluidos los márgenes alrededor de las imágenes,

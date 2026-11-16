@@ -77,7 +77,7 @@ def download(url: str, params: dict, max_bytes: int) -> bytes:
                 for chunk in response.iter_bytes():
                     content.extend(chunk)
                     if len(content) > max_bytes:
-                        raise ArchiveError("IRSA devolvió un archivo demasiado grande.")
+                        raise ArchiveError("IRSA returned a file that is too large.")
                 return bytes(content)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in (429, 502, 503, 504) or attempt == 2:
@@ -88,7 +88,7 @@ def download(url: str, params: dict, max_bytes: int) -> bytes:
                 raise
             logger.warning("Conexión con IRSA interrumpida; reintentando")
         time.sleep(2**attempt)
-    raise ArchiveError("La descarga de IRSA no se completó.")
+    raise ArchiveError("The IRSA download did not complete.")
 
 
 def query_collection(collection: str, ra: float, dec: float) -> tuple[list, bool]:
@@ -104,18 +104,18 @@ def query_collection(collection: str, ra: float, dec: float) -> tuple[list, bool
     root = ElementTree.fromstring(content)
     statuses = [node for node in root.iter() if node.get("name") == "QUERY_STATUS"]
     if any(node.get("value") == "ERROR" for node in statuses):
-        raise ArchiveError(f"IRSA rechazó la consulta de {collection}.")
+        raise ArchiveError(f"IRSA rejected the query for {collection}.")
     truncated = any(node.get("value") == "OVERFLOW" for node in statuses)
     table = parse_single_table(io.BytesIO(content)).to_table(use_names_over_ids=True)
     observations = []
     for row in table:
         source = str(row["access_url"])
         if not valid_source(source):
-            raise ArchiveError("IRSA devolvió una URL FITS no reconocida.")
+            raise ArchiveError("IRSA returned an unrecognized FITS URL.")
         detector_match = re.search(r"D([1-6])_", source)
         mjd = float(row["t_min"])
         if not math.isfinite(mjd):
-            raise ArchiveError("Una observación de IRSA no tiene fecha válida.")
+            raise ArchiveError("An IRSA observation does not have a valid date.")
         observations.append(
             {
                 "id": hashlib.sha256(source.encode()).hexdigest()[:20],
@@ -142,8 +142,8 @@ def search(ra: float, dec: float, detector: int, limit: int | None = None) -> di
     for collection, (rows, truncated) in zip(COLLECTIONS, results, strict=True):
         if truncated:
             warnings.append(
-                f"{collection}: consulta truncada por IRSA; "
-                "la muestra no representa todo el intervalo disponible."
+                f"{collection}: query truncated by IRSA; "
+                "the sample does not represent the full available range."
             )
         for row in rows:
             if row["detector"] == detector:
@@ -154,8 +154,8 @@ def search(ra: float, dec: float, detector: int, limit: int | None = None) -> di
         indices = np.linspace(0, count - 1, limit, dtype=int)
         ordered = [ordered[index] for index in indices]
         warnings.append(
-            f"Se muestran {limit} de {count} observaciones, "
-            "muestreadas en orden temporal; no es una serie completa."
+            f"Showing {limit} of {count} observations, "
+            "sampled in chronological order; this is not a complete series."
         )
     return {
         "observations": ordered,
@@ -196,7 +196,7 @@ def prepare_frame(content: bytes, ra: float, dec: float, fov: float) -> dict:
         )
         valid = np.isfinite(aligned)
         if not valid.any():
-            raise ArchiveError("El recorte no contiene píxeles válidos en este campo.")
+            raise ArchiveError("The cutout contains no valid pixels in this field.")
         spectral_wcs = WCS(image.header, fobj=hdus, key="W")
         spectral_wcs.sip = None
         cx, cy = source_wcs.world_to_pixel_values(ra, dec)
@@ -219,7 +219,7 @@ def prepare_frame(content: bytes, ra: float, dec: float, fov: float) -> dict:
 
 def frame(source_url: str, ra: float, dec: float, fov: float) -> dict:
     if not valid_source(source_url):
-        raise ArchiveError("URL de observación no permitida.")
+        raise ArchiveError("Observation URL is not allowed.")
     key = hashlib.sha256(
         json.dumps([1, source_url, float(ra), float(dec), float(fov)]).encode()
     ).hexdigest()

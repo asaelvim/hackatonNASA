@@ -66,4 +66,18 @@ describe("comparación científica en Canvas", () => {
     );
     expect([...result]).toEqual([15, 20, 32, 255, 15, 20, 32, 255]);
   });
+
+  it("resalta las anomalías sobre la imagen original", () => {
+    const result = renderPixels(
+      frame([1, 2]),
+      frame([1, 2]),
+      "anomaly",
+      [0, 2],
+      1,
+      false,
+      Uint8Array.from([0, 1]),
+    );
+
+    expect([...result.slice(4, 8)]).toEqual([255, 202, 80, 255]);
+  });
 });

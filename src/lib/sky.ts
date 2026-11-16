@@ -7,34 +7,34 @@ export interface Query {
 
 export const presets = [
   {
-    name: "Estrella de Barnard",
+    name: "Barnard's Star",
     ra: 269.452083,
     dec: 4.693364,
-    detail: "Movimiento propio · coordenadas de referencia",
+    detail: "Proper motion · reference coordinates",
   },
   {
     name: "Epsilon Indi B",
     ra: 331.044167,
     dec: -56.782844,
-    detail: "Enanas marrones · par no resuelto por SPHEREx",
+    detail: "Brown dwarfs · unresolved pair in SPHEREx",
   },
   {
     name: "WISE 0855−0714",
     ra: 133.795129,
     dec: -7.245147,
-    detail: "Fuente débil · una exposición puede no detectarla",
+    detail: "Faint source · a single exposure may not detect it",
   },
   {
     name: "RW Aurigae",
     ra: 76.956542,
     dec: 30.401439,
-    detail: "Estrella variable · cambios de brillo",
+    detail: "Variable star · brightness changes",
   },
   {
     name: "R Draconis",
     ra: 248.167625,
     dec: 66.754981,
-    detail: "Estrella variable · cambios de brillo",
+    detail: "Variable star · brightness changes",
   },
 ];
 
@@ -56,17 +56,17 @@ export const defaults: Query = {
 
 export function validateQuery(query: Query): string | null {
   if (!Number.isFinite(query.ra) || query.ra < 0 || query.ra >= 360)
-    return "La ascensión recta debe estar entre 0 y menos de 360 grados.";
+    return "Right ascension must be between 0 and less than 360 degrees.";
   if (!Number.isFinite(query.dec) || Math.abs(query.dec) > 90)
-    return "La declinación debe estar entre −90 y 90 grados.";
+    return "Declination must be between −90 and 90 degrees.";
   if (!Number.isFinite(query.fov) || query.fov < 1 || query.fov > 30)
-    return "El campo de visión debe estar entre 1 y 30 minutos de arco.";
+    return "Field of view must be between 1 and 30 arcminutes.";
   if (
     !Number.isInteger(query.detector) ||
     query.detector < 1 ||
     query.detector > 6
   )
-    return "Selecciona un detector entre 1 y 6.";
+    return "Select a detector from 1 to 6.";
   return null;
 }
 

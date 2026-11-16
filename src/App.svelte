@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { search, loadFrame } from "./lib/api";
+  import { onMount, tick } from "svelte";
+  import { loadFrame, saveAnomalyReport, search } from "./lib/api";
   import type { Frame, Observation } from "./lib/api";
   import {
     defaults,
@@ -29,15 +29,28 @@
   let loadingCompleted = $state(0);
   let theme = $state<"light" | "dark">("light");
   const themeAction = $derived(
-    theme === "light" ? "Activar modo oscuro" : "Activar modo claro",
+    theme === "light" ? "Enable dark mode" : "Enable light mode",
   );
-  let status = $state("Iniciando consulta de observaciones reales…");
+  let status = $state("Starting real-observation query…");
   let index = $state(0);
   let referenceIndex = $state(0);
   let secondaryReferenceIndex = $state(0);
   let playing = $state(false);
   let autoplayAllowed = $state(false);
   let previewSavedAt = $state<string | null>(null);
+  let previewMessageDismissed = $state(false);
+  let tutorialPrompt = $state(false);
+  let tutorialStep = $state(-1);
+  let tutorialHighlight = $state<DOMRect | null>(null);
+  let tutorialCardPosition = $state({ left: 16, top: 16 });
+  let markingAnomaly = $state(false);
+  let reportedPixel = $state<{ x: number; y: number } | null>(null);
+  let anomalyCategory = $state("");
+  let anomalyDetail = $state("");
+  let anomalyConfidence = $state("");
+  let anomalyQuestion = $state(1);
+  let anomalyReportSaved = $state(false);
+  let skipTutorialPrompt = $state(false);
   const usingPreview = $derived(previewSavedAt !== null);
   let fps = $state(1);
   let mode = $state<Mode>("image");
@@ -65,13 +78,60 @@
   let dragStartY = 0;
   let controller: AbortController | undefined;
   let generation = 0;
-  const availableModes: Mode[] = ["image", "blink", "overlay", "difference"];
+  const availableModes: Mode[] = [
+    "image",
+    "blink",
+    "overlay",
+    "difference",
+  ];
   const modeLabels: Record<Mode, string> = {
-    image: "Serie temporal",
-    blink: "Alternar A/B",
-    overlay: "Superponer A/B",
-    difference: "Diferencia A − B",
+    image: "Time series",
+    blink: "Blink images",
+    overlay: "Overlay images",
+    difference: "Difference",
+    anomaly: "Anomalies",
   };
+  const modeHelp: Record<Mode, string> = {
+    image: "",
+    blink:
+      "Press play to alternate between the current image and the reference.",
+    overlay: "Combines the current image in red with the reference in cyan.",
+    difference:
+      "Highlights what changes between the current image and the reference.",
+    anomaly: "Highlights in yellow pixels that differ from the series median.",
+  };
+  const tutorialSteps = [
+    {
+      selector: ".toolbar",
+      title: "Control bar",
+      text: "Use this bar to choose the region and detector. The D1–D6 selector changes the queried SPHEREx detector: each observes the same region in a different spectral band. You can then adjust contrast, change the theme, share the query, and control zoom or full screen.",
+    },
+    {
+      selector: ".region-popover .popover-content",
+      title: "Choose a region",
+      text: "Choose a reference object from the list or use custom coordinates: enter right ascension (RA) and declination (Dec) in degrees. Adjust the field of view to set the cutout size, then press Explore.",
+    },
+    {
+      selector: "#mode",
+      title: "Change the view",
+      text: "Compare epochs, overlay images, or show moving sources.",
+    },
+    {
+      selector: "#mode",
+      title: "Detect anomalies",
+      text: "Choose Overlay images: the current epoch appears in red and the reference in cyan. A red point without a matching cyan point is a candidate you can mark with the target button. Compare it with nearby epochs before reporting it.",
+    },
+    {
+      selector: "#timeline",
+      title: "Explore time",
+      text: "Move the timeline slider to view each observation and detect changes.",
+    },
+    {
+      selector: ".view-tools",
+      title: "Examine the details",
+      text: "Zoom in, zoom out, or reset the view to inspect a region.",
+    },
+  ];
   const range = $derived(sharedRange(frames, hideFlags));
   const shownIndex = $derived(
     mode === "blink" && blinkReference ? referenceIndex : index,
@@ -93,6 +153,8 @@
   );
 
   onMount(() => {
+    skipTutorialPrompt =
+      localStorage.getItem("skip-tutorial-prompt") === "true";
     query = readQuery(window.location.search);
     autoplayAllowed = !window.matchMedia("(prefers-reduced-motion: reduce)")
       .matches;
@@ -111,6 +173,169 @@
       clearViewerFocus();
     };
   });
+
+  async function updateTutorialHighlight() {
+    regionOpen = tutorialStep === 1;
+    await tick();
+    const target = document.querySelector<HTMLElement>(
+      tutorialSteps[tutorialStep]?.selector,
+    );
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    await tick();
+    tutorialHighlight = target.getBoundingClientRect();
+    const { left, right, top, bottom } = tutorialHighlight;
+    const cardWidth = Math.min(390, window.innerWidth - 32);
+    const cardHeight = 230;
+    const preferredTop =
+      bottom + 16 + cardHeight <= window.innerHeight
+        ? bottom + 16
+        : top - cardHeight - 16;
+    tutorialCardPosition = {
+      left:
+        right + 16 + cardWidth <= window.innerWidth
+          ? right + 16
+          : Math.max(16, left - cardWidth - 16),
+      top: Math.max(
+        16,
+        Math.min(window.innerHeight - cardHeight - 16, preferredTop),
+      ),
+    };
+  }
+
+  function startTutorial() {
+    tutorialPrompt = false;
+    tutorialStep = 0;
+    void updateTutorialHighlight();
+  }
+
+  function closeTutorial() {
+    tutorialStep = -1;
+    tutorialHighlight = null;
+    regionOpen = false;
+  }
+
+  function nextTutorial() {
+    if (tutorialStep === tutorialSteps.length - 1) {
+      closeTutorial();
+      return;
+    }
+    tutorialStep++;
+    void updateTutorialHighlight();
+  }
+
+  function previousTutorial() {
+    if (tutorialStep === 0) return;
+    tutorialStep--;
+    void updateTutorialHighlight();
+  }
+
+  const anomalyDetails: Record<string, string[]> = {
+    position: [
+      "The point changed position, but the others remained fixed.",
+      "The whole image appears to move.",
+      "It moved and then returned to its position.",
+      "I am not sure.",
+    ],
+    brightness: [
+      "It is brighter now.",
+      "It is dimmer now.",
+      "Its brightness increases and decreases.",
+      "I am not sure.",
+    ],
+    appearance: [
+      "It appears in the first image and disappears later.",
+      "It does not appear at first, but it does later.",
+      "It appears and disappears several times.",
+      "I am not sure.",
+    ],
+    shape: [
+      "It looks larger or smaller.",
+      "It looks elongated or distorted.",
+      "Several points now seem visible.",
+      "I am not sure.",
+    ],
+    other: [
+      "I see a point I had not noticed.",
+      "There is a spot or an unusual shape.",
+      "The image changes unexpectedly.",
+      "I cannot explain it, but I want to flag it.",
+    ],
+  };
+  const anomalyCategories = [
+    ["position", "Changed position"],
+    ["brightness", "Changed brightness"],
+    ["appearance", "Appeared or disappeared"],
+    ["shape", "Changed shape"],
+    ["other", "Something looks unusual"],
+  ] as const;
+
+  function chooseAnomalyPixel(event: MouseEvent, frame: Frame) {
+    if (!markingAnomaly || !(event.currentTarget instanceof HTMLCanvasElement))
+      return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    reportedPixel = {
+      x: Math.max(
+        0,
+        Math.min(
+          frame.width - 1,
+          Math.floor(
+            ((event.clientX - bounds.left) / bounds.width) * frame.width,
+          ),
+        ),
+      ),
+      y: Math.max(
+        0,
+        Math.min(
+          frame.height - 1,
+          Math.floor(
+            ((event.clientY - bounds.top) / bounds.height) * frame.height,
+          ),
+        ),
+      ),
+    };
+    anomalyCategory = "";
+    anomalyDetail = "";
+    anomalyConfidence = "";
+    anomalyQuestion = 1;
+    anomalyReportSaved = false;
+    markingAnomaly = false;
+  }
+
+  async function submitAnomalyReport() {
+    if (
+      !reportedPixel ||
+      !anomalyCategory ||
+      !anomalyDetail ||
+      !anomalyConfidence ||
+      !observation
+    )
+      return;
+    try {
+      await saveAnomalyReport({
+        observation_id: observation.id,
+        date: observation.date,
+        ...reportedPixel,
+        category: anomalyCategory,
+        detail: anomalyDetail,
+        confidence: anomalyConfidence,
+      });
+      status = "Anomaly report saved.";
+      anomalyReportSaved = true;
+    } catch (error) {
+      errors = [
+        ...errors,
+        error instanceof Error
+          ? error.message
+          : "Could not save the anomaly report.",
+      ];
+    }
+  }
+
+  function nextAnomalyQuestion() {
+    if (anomalyQuestion === 1 && anomalyCategory) anomalyQuestion = 2;
+    else if (anomalyQuestion === 2 && anomalyDetail) anomalyQuestion = 3;
+  }
 
   $effect(() => {
     document.documentElement.dataset.theme = theme;
@@ -245,7 +470,7 @@
     wakeCursor(event);
     if (
       event.target instanceof Element &&
-      event.target.closest("button, select, input, label")
+      event.target.closest("button, select, input, label, summary")
     )
       return;
     if (busy || !current || zoom <= 1 || event.button !== 0 || !skyContainer)
@@ -274,7 +499,7 @@
   function navigateImage(event: KeyboardEvent) {
     if (
       event.target instanceof Element &&
-      event.target.closest("button, select, input, label")
+      event.target.closest("button, select, input, label, summary")
     )
       return;
     if (busy || !current) return;
@@ -296,7 +521,7 @@
       if (document.fullscreenElement) await document.exitFullscreen();
       else await appElement?.requestFullscreen();
     } catch {
-      errors = [...errors, "No se pudo cambiar al modo de pantalla completa."];
+      errors = [...errors, "Could not switch to full-screen mode."];
     }
   }
 
@@ -325,11 +550,12 @@
     errors = [];
     frameIssues = [];
     warnings = [];
+    previewMessageDismissed = false;
     progress = null;
     loadingTotal = 0;
     loadingCompleted = 0;
     busy = true;
-    status = "Consultando DR1 y QR3 en NASA/IPAC IRSA…";
+    status = "Querying DR1 and QR3 at NASA/IPAC IRSA…";
     try {
       const result = await search(submitted, signal);
       if (token !== generation) return;
@@ -338,8 +564,8 @@
       loadingTotal = result.observations.length;
       if (!result.observations.length) {
         status = usingPreview
-          ? "IRSA no devolvió observaciones para actualizar la vista previa."
-          : `No hay observaciones disponibles para estas coordenadas y detector.${frames.length ? " Se conserva la vista anterior." : ""}`;
+          ? "IRSA returned no observations to update the saved preview."
+          : `No observations are available for these coordinates and detector.${frames.length ? " The previous view is preserved." : ""}`;
         return;
       }
       const loaded: { observation: Observation; frame: Frame }[] = [];
@@ -355,26 +581,26 @@
             if (signal.aborted) return;
             frameIssues = [
               ...frameIssues,
-              `${item.date.slice(0, 10)} · ${item.obs_id}: ${error instanceof Error ? error.message : "Error al cargar la imagen."}`,
+              `${item.date.slice(0, 10)} · ${item.obs_id}: ${error instanceof Error ? error.message : "Error loading image."}`,
             ];
           }
           if (token !== generation) return;
           loadingCompleted++;
           progress = 10 + Math.round((loadingCompleted / loadingTotal) * 90);
-          status = `Preparando la serie: ${loadingCompleted}/${loadingTotal} observaciones procesadas · ${loaded.length} imágenes listas`;
+          status = `Preparing the series: ${loadingCompleted}/${loadingTotal} observations processed · ${loaded.length} images ready`;
         }
       };
       await Promise.all([worker(), worker()]);
       if (token !== generation || signal.aborted) return;
       if (!loaded.length) {
         errors = [
-          "No se pudo preparar ninguna imagen de esta consulta. Puedes volver a explorar para reintentar.",
+          "Could not prepare any images from this query. You can explore again to retry.",
         ];
         status = usingPreview
-          ? "No se pudo actualizar. Se conserva la vista previa guardada."
+          ? "Could not update. The saved preview is preserved."
           : frames.length
-            ? "No se pudo actualizar. Se conserva la última serie completa."
-            : "No se pudo preparar ninguna imagen. Consulta los errores.";
+            ? "Could not update. The last complete series is preserved."
+            : "Could not prepare any images. Check the errors.";
         return;
       }
       loaded.sort((a, b) => a.observation.mjd - b.observation.mjd);
@@ -396,23 +622,24 @@
         shareUrl(window.location.href, submitted),
       );
       status = frameIssues.length
-        ? `${frames.length} de ${loadingTotal} imágenes listas · resultado parcial`
-        : `${frames.length} imágenes reales listas · ${result.total} observaciones encontradas`;
+        ? `${frames.length} of ${loadingTotal} images ready · partial result`
+        : `${frames.length} real images ready · ${result.total} observations found`;
+      tutorialPrompt = !skipTutorialPrompt;
       if (frames.length === 1)
         warnings = [
           ...warnings,
-          "Solo hay una imagen cargada; no es posible comparar épocas.",
+          "Only one image is loaded; comparing epochs is not possible.",
         ];
     } catch (error) {
       if (signal.aborted || token !== generation) return;
       errors = [
-        error instanceof Error ? error.message : "No se pudo consultar IRSA.",
+        error instanceof Error ? error.message : "Could not query IRSA.",
       ];
       status = usingPreview
-        ? "La actualización falló. Se conserva la vista previa guardada."
+        ? "The update failed. The saved preview is preserved."
         : frames.length
-          ? "La actualización falló. Se conserva la última serie completa."
-          : "La consulta no se completó.";
+          ? "The update failed. The last complete series is preserved."
+          : "The query did not complete.";
     } finally {
       if (token === generation) busy = false;
     }
@@ -427,8 +654,8 @@
     secondaryBlinkReference = false;
     busy = false;
     status = frames.length
-      ? `Consulta cancelada. Se conservaron ${frames.length} imágenes cargadas.`
-      : "Consulta cancelada. Puedes iniciar otra búsqueda.";
+      ? `Query cancelled. ${frames.length} loaded images were preserved.`
+      : "Query cancelled. You can start another search.";
   }
 
   async function copyLink() {
@@ -436,11 +663,11 @@
       await navigator.clipboard.writeText(
         shareUrl(window.location.href, activeQuery ?? query),
       );
-      status = "Enlace de la región copiado.";
+      status = "Region link copied.";
     } catch {
       errors = [
         ...errors,
-        "No se pudo acceder al portapapeles. Copia la URL de la barra del navegador.",
+        "Could not access the clipboard. Copy the URL from the browser address bar.",
       ];
     }
   }
@@ -448,10 +675,7 @@
   function changeMode(value: string, viewer: 1 | 2 = 1) {
     const selectedMode = availableModes.find((option) => option === value);
     if (!selectedMode) {
-      errors = [
-        ...errors,
-        "El modo de visualización seleccionado no es válido.",
-      ];
+      errors = [...errors, "The selected view mode is invalid."];
       return;
     }
     if (viewer === 1) {
@@ -468,6 +692,18 @@
     else secondaryReferenceIndex = value;
   }
 
+  function needsReference(selectedMode: Mode) {
+    return (
+      selectedMode === "blink" ||
+      selectedMode === "overlay" ||
+      selectedMode === "difference"
+    );
+  }
+
+  function anomalySummary() {
+    return "Use Overlay images: red points stand out in the current epoch against the cyan reference.";
+  }
+
   function step(delta: number) {
     playing = false;
     autoplayAllowed = false;
@@ -479,11 +715,11 @@
 
 {#snippet referenceControls(viewer: 1 | 2, selected: number)}
   <div class="reference-controls">
-    <label for={`reference-${viewer}`}>Frame B</label>
+    <label for={`reference-${viewer}`}>Reference</label>
     <select
       id={`reference-${viewer}`}
       class="reference-select"
-      aria-label={`Referencia B del visor ${viewer}`}
+      aria-label={`Viewer ${viewer} reference`}
       value={selected}
       disabled={busy || frames.length < 2}
       onchange={(event) =>
@@ -497,16 +733,16 @@
       {/each}
     </select>
     <button
-      aria-label={`Usar frame A como B del visor ${viewer}`}
-      title="Usar frame A como B"
+      aria-label={`Use current image as viewer ${viewer} reference`}
+      title="Select the current timeline image as the reference"
       disabled={busy || frames.length < 2}
-      onclick={() => setReference(viewer, index)}>A → B</button
+      onclick={() => setReference(viewer, index)}>Use current image</button
     >
   </div>
 {/snippet}
 
 <svelte:head>
-  <title>SPHEREx Explorer · El cielo, a través del tiempo</title>
+  <title>SPHEREx Explorer · The sky, through time</title>
 </svelte:head>
 
 <svelte:window
@@ -535,28 +771,12 @@
   class:viewer-focused={focusedViewer !== null}
   bind:this={appElement}
 >
-  <header class="toolbar" aria-label="Controles del explorador">
-    {#if busy}
-      <div
-        class="loading-progress"
-        role="progressbar"
-        aria-label="Cargando observaciones"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={progress ?? undefined}
-        aria-valuetext={progress === null
-          ? "Buscando observaciones en IRSA"
-          : `Progreso de la consulta: ${progress}%`}
-      >
-        <span
-          class:indeterminate={progress === null}
-          style:transform={progress === null
-            ? undefined
-            : `scaleX(${progress / 100})`}
-        ></span>
-      </div>
-    {/if}
-    <a class="brand" href="/" aria-label="Inicio de SPHEREx Explorer"
+  <header
+    class="toolbar"
+    aria-label="Explorer controls"
+    inert={tutorialPrompt || tutorialStep >= 0}
+  >
+    <a class="brand" href="/" aria-label="SPHEREx Explorer home"
       >SPHEREx <span>Explorer</span></a
     >
     <div class="instrument-controls">
@@ -576,16 +796,16 @@
               regionOpen = !regionOpen;
               settingsOpen = false;
             }}
-            title="Elegir objeto, coordenadas y campo de visión"
+            title="Choose object, coordinates, and field of view"
           >
             <span class="region-name"
-              >{selectedPreset?.name ?? "Coordenadas"}</span
+              >{selectedPreset?.name ?? "Coordinates"}</span
             >
             <span class="chevron" aria-hidden="true">⌄</span>
           </summary>
           <div class="popover-content">
-            <h1>Región del cielo</h1>
-            <label for="preset">Objeto de referencia</label>
+            <h1>Sky region</h1>
+            <label for="preset">Reference object</label>
             <select
               id="preset"
               value={selectedPreset
@@ -593,18 +813,17 @@
                 : ""}
               onchange={(event) => selectPreset(event.currentTarget.value)}
             >
-              <option value="" disabled>Coordenadas personalizadas</option>
+              <option value="" disabled>Custom coordinates</option>
               {#each presets as preset, i}
                 <option value={String(i)}>{preset.name}</option>
               {/each}
             </select>
             <p class="hint">
-              {selectedPreset?.detail ??
-                "Coordenadas ICRS en grados decimales."}
+              {selectedPreset?.detail ?? "ICRS coordinates in decimal degrees."}
             </p>
             <div class="coordinate-fields">
               <div>
-                <label for="ra">Ascensión recta (°)</label>
+                <label for="ra">Right ascension (°)</label>
                 <input
                   id="ra"
                   type="number"
@@ -616,7 +835,7 @@
                 />
               </div>
               <div>
-                <label for="dec">Declinación (°)</label>
+                <label for="dec">Declination (°)</label>
                 <input
                   id="dec"
                   type="number"
@@ -628,7 +847,7 @@
                 />
               </div>
             </div>
-            <label for="fov">Campo de visión <span>{query.fov}′</span></label>
+            <label for="fov">Field of view <span>{query.fov}′</span></label>
             <input
               id="fov"
               type="range"
@@ -638,22 +857,22 @@
               bind:value={query.fov}
             />
             <div class="range-labels">
-              <span>1′ · detalle</span><span>30′ · contexto</span>
+              <span>1′ · detail</span><span>30′ · context</span>
             </div>
             <p class="hint">
-              Las coordenadas no se propagan a cada época. Usa un campo amplio
-              para objetos de alto movimiento propio, como Barnard.
+              Coordinates do not propagate to each epoch. Use a wide field for
+              high-proper-motion objects, such as Barnard's Star.
             </p>
             <button type="submit" class="primary" disabled={busy}
-              >Explorar esta región</button
+              >Explore this region</button
             >
           </div>
         </details>
-        <label class="sr-only" for="detector">Detector infrarrojo</label>
+        <label class="sr-only" for="detector">Infrared detector</label>
         <select
           id="detector"
           bind:value={query.detector}
-          title="Detector infrarrojo"
+          title="Infrared detector"
         >
           {#each detectors as band, i}
             <option value={i + 1}>D{i + 1} · {band}</option>
@@ -662,45 +881,22 @@
         <button
           type="submit"
           class="primary"
-          aria-label="Explorar región"
-          disabled={busy}>Explorar</button
+          aria-label="Explore region"
+          disabled={busy}>Explore</button
         >
         {#if busy}
           <button
             type="button"
             class="cancel"
-            aria-label="Cancelar consulta"
-            onclick={cancel}>Cancelar</button
+            aria-label="Cancel query"
+            onclick={cancel}>Cancel</button
           >
         {/if}
       </form>
 
       <div class="control-group display-controls">
-        <button
-          class="dual-toggle"
-          aria-label={dualView ? "Mostrar un visor" : "Mostrar dos visores"}
-          aria-pressed={dualView}
-          title={dualView ? "Mostrar un visor" : "Mostrar dos visores"}
-          disabled={busy}
-          onclick={() => {
-            clearViewerFocus();
-            dualView = !dualView;
-            secondaryBlinkReference = false;
-          }}
-        >
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.6"
-          >
-            <rect x="3" y="5" width="18" height="14" rx="2"></rect>
-            <path d="M12 5v14"></path>
-          </svg>
-        </button>
         <label class="contrast-control" for="contrast">
-          Contraste
+          Contrast
           <input
             id="contrast"
             type="range"
@@ -714,27 +910,27 @@
 
       <div class="control-group view-tools">
         <button
-          aria-label="Alejar"
-          title="Alejar (−)"
+          aria-label="Zoom out"
+          title="Zoom out (−)"
           onclick={() => zoomBy(-0.5)}
           disabled={busy || !current || zoom <= 1}>−</button
         >
         <button
           class="zoom-reset"
-          aria-label="Restablecer vista"
-          title="Restablecer vista (0)"
+          aria-label="Reset view"
+          title="Reset view (0)"
           onclick={resetZoom}
           disabled={busy || !current}>{Math.round(zoom * 100)}%</button
         >
         <button
-          aria-label="Acercar"
-          title="Acercar (+)"
+          aria-label="Zoom in"
+          title="Zoom in (+)"
           onclick={() => zoomBy(0.5)}
           disabled={busy || !current || zoom >= 4}>+</button
         >
         <button
-          aria-label="Alternar pantalla completa"
-          title="Pantalla completa"
+          aria-label="Toggle full screen"
+          title="Full screen"
           onclick={() => void toggleFullscreen()}>⛶</button
         >
       </div>
@@ -744,7 +940,7 @@
       <details class="popover settings-popover" open={settingsOpen}>
         <summary
           id="settings-toggle"
-          aria-label="Ajustes"
+          aria-label="Settings"
           onclick={(event) => {
             event.preventDefault();
             settingsOpen = !settingsOpen;
@@ -765,74 +961,71 @@
             <circle cx="16" cy="12" r="2"></circle>
             <circle cx="8" cy="18" r="2"></circle>
           </svg>
-          <span class="settings-label">Ajustes</span>
+          <span class="settings-label">Settings</span>
           <span class="chevron" aria-hidden="true">⌄</span>
         </summary>
         <div class="popover-content">
-          <h2>Comparación y datos</h2>
-          <p class="hint">
-            Superposición: A en rojo, B en cian. En modo A/B, pulsa reproducir
-            para alternar.
-          </p>
+          <h2>Comparison and data</h2>
           <label class="checkbox">
             <input type="checkbox" bind:checked={hideFlags} />
-            Ocultar píxeles con cualquier bandera de calidad
+            Hide pixels with any quality flag
           </label>
           <p class="hint">
-            Algunas banderas son informativas. Ocultarlas todas puede dejar el
-            visor vacío.
+            Some flags are informative. Hiding them all can leave the viewer
+            empty.
           </p>
           {#if current}
             <dl class="metadata">
               <div>
-                <dt>Brillo</dt>
+                <dt>Brightness</dt>
                 <dd>{current.unit}</dd>
               </div>
               <div>
-                <dt>Ancho de banda</dt>
+                <dt>Bandwidth</dt>
                 <dd>
-                  {current.bandwidth_um?.toFixed(3) ?? "No disponible"} μm
+                  {current.bandwidth_um?.toFixed(3) ?? "Unavailable"} μm
                 </dd>
               </div>
               <div>
-                <dt>Cobertura</dt>
+                <dt>Coverage</dt>
                 <dd>{(current.coverage * 100).toFixed(1)}%</dd>
               </div>
               <div>
-                <dt>Con banderas</dt>
+                <dt>Flagged</dt>
                 <dd>{(current.flagged_fraction * 100).toFixed(1)}%</dd>
               </div>
             </dl>
           {/if}
           <p class="hint science-note">
-            Escala de brillo común a la serie. Fondo zodiacal sin sustraer. Las
-            diferencias también pueden deberse a longitud de onda, PSF, ruido o
-            contaminación: no confirman movimiento ni variabilidad. Cada
-            detector cubre varias longitudes de onda, no una banda fija.
+            Common brightness scale across the series. Zodiacal background is
+            not subtracted. Differences may also be caused by wavelength, PSF,
+            noise, or contamination: they do not confirm motion or variability.
+            Each detector covers multiple wavelengths, not a fixed band.
           </p>
           <p class="hint">
-            Arrastra la imagen ampliada para desplazarte, o enfoca el visor y
-            usa las flechas. + / − amplían y 0 restablece la vista.
+            Drag the zoomed image to pan, or focus the viewer and use the arrow
+            keys. + / − zoom, and 0 resets the view.
           </p>
           <a
             href="https://irsa.ipac.caltech.edu/Missions/spherex.html"
             target="_blank"
-            rel="noreferrer">Archivo NASA/IPAC ↗</a
+            rel="noreferrer">NASA/IPAC archive ↗</a
           >
           <p class="credits">
-            NASA Space Apps Challenge · Equipo Otarios<br />Instituto
-            Tecnológico de La Paz<br />Datos: NASA / JPL-Caltech / IPAC ·
-            Proyecto independiente
+            NASA Space Apps Challenge · Otarios Team<br />La Paz Institute of
+            Technology<br />Data: NASA / JPL-Caltech / IPAC · Independent
+            project
           </p>
         </div>
       </details>
       <button
         class="share"
+        hidden
         onclick={copyLink}
         disabled={busy || !activeQuery}
-        title="Copiar enlace de la región"
+        title="Copy region link"
       >
-        Compartir ↗
+        Share ↗
       </button>
       <button
         class="theme-toggle"
@@ -865,7 +1058,7 @@
 
   <main
     class="workspace"
-    aria-label="Visor temporal de SPHEREx"
+    aria-label="SPHEREx time-series viewer"
     aria-busy={busy}
   >
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (The spatial viewer supports keyboard zoom and pan.) -->
@@ -874,9 +1067,10 @@
       class:has-image={!busy && !!current}
       class:zoomed={!busy && zoom > 1}
       class:dragging
+      inert={tutorialPrompt || tutorialStep >= 0}
       bind:this={skyContainer}
       role="application"
-      aria-label="Visor astronómico. Usa + y − para ampliar, flechas para desplazar y 0 para restablecer."
+      aria-label="Astronomical viewer. Use + and − to zoom, arrow keys to pan, and 0 to reset."
       tabindex={!busy && current ? 0 : -1}
       onkeydown={navigateImage}
       onpointerenter={wakeCursor}
@@ -888,6 +1082,24 @@
       onlostpointercapture={() => (dragging = false)}
     >
       {#if busy}
+        <div
+          class="loading-progress"
+          role="progressbar"
+          aria-label="Loading observations"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progress ?? undefined}
+          aria-valuetext={progress === null
+            ? "Searching for observations at IRSA"
+            : `Query progress: ${progress}%`}
+        >
+          <span
+            class:indeterminate={progress === null}
+            style:transform={progress === null
+              ? undefined
+              : `scaleX(${progress / 100})`}
+          ></span>
+        </div>
         <section class="loading-state" aria-labelledby="loading-title">
           <div class="loading-visual" aria-hidden="true">
             <span class="loading-orbit"></span>
@@ -915,52 +1127,52 @@
           <span class="loading-kicker">SPHEREx · NASA/IPAC IRSA</span>
           <h2 id="loading-title">
             {progress === null
-              ? "Buscando tu región"
-              : "Construyendo la serie temporal"}
+              ? "Searching your region"
+              : "Building the time series"}
           </h2>
           <p>
             {progress === null
-              ? "Consultando las observaciones disponibles en el archivo."
-              : "Descargando y alineando los recortes sobre la misma cuadrícula celeste."}
+              ? "Querying available observations in the archive."
+              : "Downloading and aligning cutouts onto the same celestial grid."}
           </p>
           <div class="loading-detail">
             {progress === null
-              ? "Cada imagen tiene una historia. Estamos reuniéndolas."
-              : `${loadingCompleted} de ${loadingTotal} observaciones procesadas`}
+              ? "Every image has a story. We are bringing them together."
+              : `${loadingCompleted} of ${loadingTotal} observations processed`}
           </div>
-          <ol class="loading-steps" aria-label="Etapas de carga">
+          <ol class="loading-steps" aria-label="Loading stages">
             <li
               class:active={progress === null}
               class:done={progress !== null}
               aria-current={progress === null ? "step" : undefined}
             >
-              <span>01</span>Archivo
+              <span>01</span>Archive
             </li>
             <li
               class:active={progress !== null}
               aria-current={progress !== null ? "step" : undefined}
             >
-              <span>02</span>Preparación
+              <span>02</span>Preparation
             </li>
-            <li><span>03</span>Visor</li>
+            <li><span>03</span>Viewer</li>
           </ol>
         </section>
       {:else if current}
         <div class="viewer-panes" class:dual={dualView}>
-          <section
+          <div
             class="viewer-pane series-pane"
             class:focused={focusedViewer === 1}
             class:cursor-hidden={focusedViewer === 1 && cursorHidden}
             data-viewer="1"
-            aria-label="Visor 1"
+            aria-label="Viewer 1"
           >
             <div class="pane-header">
-              <h2 class="pane-title">Visor 1</h2>
-              <label class="sr-only" for="mode">Visualización</label>
+              <h2 class="pane-title">Viewer 1</h2>
+              <label class="sr-only" for="mode">View</label>
               <select
                 id="mode"
                 value={mode}
-                title="Modo del visor 1"
+                title="Viewer 1 mode"
                 onchange={(event) => changeMode(event.currentTarget.value)}
               >
                 {#each availableModes as value}
@@ -971,15 +1183,65 @@
                   >
                 {/each}
               </select>
-              {#if mode !== "image"}
+              {#if needsReference(mode)}
                 {@render referenceControls(1, referenceIndex)}
               {/if}
+              <button
+                class="anomaly-target"
+                aria-label="Mark an anomaly"
+                title="Freeze the image and mark an anomaly"
+                aria-pressed={markingAnomaly}
+                disabled={busy}
+                onclick={() => {
+                  playing = false;
+                  markingAnomaly = !markingAnomaly;
+                }}
+              >
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                >
+                  <circle cx="12" cy="12" r="7"></circle>
+                  <circle cx="12" cy="12" r="2"></circle>
+                  <path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path>
+                </svg>
+              </button>
+              >
+              <button
+                class="dual-toggle"
+                aria-label={dualView ? "Show one viewer" : "Show two viewers"}
+                aria-pressed={dualView}
+                title={dualView
+                  ? "Close second viewer"
+                  : "Open second viewer to compare"}
+                disabled={busy}
+                onclick={() => {
+                  clearViewerFocus();
+                  dualView = !dualView;
+                  secondaryBlinkReference = false;
+                }}
+              >
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                >
+                  <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+                  <path d="M12 5v14"></path>
+                </svg>
+              </button>
             </div>
             <div class="image-viewport" bind:this={imageViewport}>
               <canvas
                 bind:this={canvas}
                 style:transform="translate({panX}px, {panY}px) scale({zoom})"
-                aria-label="Recorte astronómico alineado: norte arriba, este a la izquierda"
+                onclick={(event) => chooseAnomalyPixel(event, current)}
+                aria-label="Aligned astronomical cutout: north up, east left"
               ></canvas>
               <span class="north">N ↑</span><span class="east">E ←</span>
               <div class="image-label">
@@ -991,37 +1253,37 @@
                   2,
                 )}″/px
               </div>
-              {#if mode !== "image" && frames.length > 1}
+              {#if mode === "anomaly"}
+                <div class="comparison-note">{anomalySummary()}</div>
+              {:else if needsReference(mode) && frames.length > 1}
                 <div class="comparison-note">
-                  A: {observations[index]?.date.slice(0, 10)} · {frames[
+                  Current: {observations[index]?.date.slice(0, 10)} · {frames[
                     index
                   ]?.wavelength_um?.toFixed(3) ?? "?"} μm<br />
-                  B: {observations[referenceIndex]?.date.slice(0, 10)} · {frames[
-                    referenceIndex
-                  ]?.wavelength_um?.toFixed(3) ?? "?"} μm
-                  {#if index === referenceIndex}<br />A y B son la misma
-                    observación.{/if}
+                  Reference: {observations[referenceIndex]?.date.slice(0, 10)} ·
+                  {frames[referenceIndex]?.wavelength_um?.toFixed(3) ?? "?"} μm
+                  {#if index === referenceIndex}<br />The current image and the
+                    reference are the same observation.{/if}
                 </div>
               {/if}
             </div>
-          </section>
+          </div>
           {#if dualView}
-            <section
+            <div
               class="viewer-pane secondary-pane"
               class:focused={focusedViewer === 2}
               class:cursor-hidden={focusedViewer === 2 && cursorHidden}
               data-viewer="2"
-              aria-label="Visor 2"
+              aria-label="Viewer 2"
             >
               <div class="pane-header">
-                <h2 class="pane-title">Visor 2</h2>
-                <label class="sr-only" for="secondary-mode"
-                  >Modo del visor 2</label
+                <h2 class="pane-title">Viewer 2</h2>
+                <label class="sr-only" for="secondary-mode">Viewer 2 mode</label
                 >
                 <select
                   id="secondary-mode"
                   value={secondaryMode}
-                  title="Modo del visor 2"
+                  title="Viewer 2 mode"
                   onchange={(event) => changeMode(event.currentTarget.value, 2)}
                 >
                   {#each availableModes as value}
@@ -1032,7 +1294,7 @@
                     >
                   {/each}
                 </select>
-                {#if secondaryMode !== "image"}
+                {#if needsReference(secondaryMode)}
                   {@render referenceControls(2, secondaryReferenceIndex)}
                 {/if}
               </div>
@@ -1041,17 +1303,21 @@
                   <canvas
                     bind:this={secondaryCanvas}
                     style:transform="translate({panX}px, {panY}px) scale({zoom})"
-                    aria-label="Recorte astronómico del visor 2: norte arriba, este a la izquierda"
+                    aria-label="Viewer 2 astronomical cutout: north up, east left"
                   ></canvas>
                   <span class="north">N ↑</span><span class="east">E ←</span>
                   {#if secondaryMode === "overlay" || secondaryMode === "difference"}
                     <div class="overlay-date">
-                      <span>A · {observations[index]?.date.slice(0, 10)}</span>
                       <span
-                        >B · {observations[secondaryReferenceIndex]?.date.slice(
+                        >Current · {observations[index]?.date.slice(
                           0,
                           10,
                         )}</span
+                      >
+                      <span
+                        >Reference · {observations[
+                          secondaryReferenceIndex
+                        ]?.date.slice(0, 10)}</span
                       >
                     </div>
                   {:else}
@@ -1070,73 +1336,93 @@
                   <div class="image-scale">
                     {activeQuery?.fov}′ × {activeQuery?.fov}′
                   </div>
-                  {#if secondaryMode !== "image" && frames.length > 1}
+                  {#if secondaryMode === "anomaly"}
+                    <div class="comparison-note">{anomalySummary()}</div>
+                  {:else if needsReference(secondaryMode) && frames.length > 1}
                     <div class="comparison-note">
-                      {#if secondaryMode === "overlay"}A en rojo · B en cian<br
-                        />{/if}
-                      A: {frames[index]?.wavelength_um?.toFixed(3) ?? "?"} μm · B:
+                      {#if secondaryMode === "overlay"}Current in red ·
+                        Reference in cyan<br />{/if}
+                      Current: {frames[index]?.wavelength_um?.toFixed(3) ?? "?"} μm
+                      · Reference:
                       {frames[secondaryReferenceIndex]?.wavelength_um?.toFixed(
                         3,
                       ) ?? "?"} μm
-                      {#if index === secondaryReferenceIndex}<br />A y B son la
-                        misma observación.{/if}
+                      {#if index === secondaryReferenceIndex}<br />The current
+                        image and the reference are the same observation.{/if}
                     </div>
                   {/if}
                 {/if}
               </div>
-            </section>
+            </div>
           {/if}
         </div>
       {:else}
         <div class="empty-state">
           <span class="empty-symbol" aria-hidden="true">+</span>
-          <h2>Una región, muchas épocas</h2>
+          <h2>One region, many epochs</h2>
           <p>
-            Elige un objeto o introduce coordenadas en el menú de región y pulsa
-            Explorar.
+            Choose an object or enter coordinates in the region menu, then press
+            Explore.
           </p>
         </div>
       {/if}
     </div>
 
-    {#if !busy && (usingPreview || warnings.length || frameIssues.length || errors.length)}
+    {#if !busy && ((usingPreview && !previewMessageDismissed) || warnings.length || frameIssues.length || errors.length)}
       <div class="messages">
-        {#if usingPreview}
-          <p class="preview-note" data-testid="saved-preview">
-            Vista previa guardada de Barnard · preparada el {previewSavedAt?.slice(
+        {#if usingPreview && !previewMessageDismissed}
+          <p
+            class="preview-note dismissible-message"
+            data-testid="saved-preview"
+          >
+            Saved preview of Barnard's Star · prepared on {previewSavedAt?.slice(
               0,
               10,
-            )}. Observaciones reales con sus fechas originales; no es una
-            consulta actualizada ni imágenes simuladas.
+            )}. Real observations with their original dates; this is not an
+            updated query or simulated images.
+            <button
+              class="dismiss-message"
+              aria-label="Close saved-preview notice"
+              title="Close notice"
+              onclick={() => (previewMessageDismissed = true)}
+              ><span aria-hidden="true">×</span></button
+            >
           </p>
         {/if}
         {#each warnings as warning}<p class="notice">{warning}</p>{/each}
         {#if frameIssues.length}
           <details class="frame-issues">
             <summary
-              >{frameIssues.length} observación(es) no pudieron prepararse · Ver detalles</summary
+              >{frameIssues.length} observation(s) could not be prepared · View details</summary
             >
             <p>
-              IRSA no permitió preparar estos recortes. Puedes volver a explorar
-              para reintentar; las imágenes disponibles no se sustituyeron por
-              datos simulados.
+              IRSA did not allow these cutouts to be prepared. You can explore
+              again to retry; available images were not replaced with simulated
+              data.
             </p>
             {#each frameIssues as issue}<p>{issue}</p>{/each}
           </details>
         {/if}
         {#if errors.length}
-          <div class="error-box" role="alert">
-            <strong>No se completaron algunas operaciones</strong>
+          <div class="error-box dismissible-message" role="alert">
+            <strong>Some operations did not complete</strong>
             {#each errors as error}<p>{error}</p>{/each}
+            <button
+              class="dismiss-message"
+              aria-label="Close error message"
+              title="Close message"
+              onclick={() => (errors = [])}
+              ><span aria-hidden="true">×</span></button
+            >
           </div>
         {/if}
       </div>
     {/if}
 
     <div class="timeline-strip">
-      <span class="timeline-caption">Épocas</span>
+      <span class="timeline-caption">Epochs</span>
       <div class="timeline-track">
-        <label class="sr-only" for="timeline">Observación actual</label>
+        <label class="sr-only" for="timeline">Current observation</label>
         <input
           id="timeline"
           class="timeline"
@@ -1155,22 +1441,22 @@
         <div class="timeline-dates">
           <span
             >{busy
-              ? "Preparando la serie…"
+              ? "Preparing the series…"
               : (observations[0]?.date.slice(0, 10) ??
-                "Primera observación")}</span
+                "First observation")}</span
           >
           <span
             >{busy
               ? ""
               : (observations.at(-1)?.date.slice(0, 10) ??
-                "Última observación")}</span
+                "Last observation")}</span
           >
         </div>
       </div>
-      <span class="timeline-count"
-        >{busy ? "En preparación" : `${frames.length} imágenes`}</span
+      <span class="timeline-count" title={busy ? undefined : anomalySummary()}
+        >{busy ? "Preparing" : `${frames.length} images`}</span
       >
-      <div class="playback" role="group" aria-label="Reproducción de la serie">
+      <div class="playback" role="group" aria-label="Series playback">
         <span class="frame-position"
           >{busy
             ? "— / —"
@@ -1178,15 +1464,15 @@
         >
         <div class="transport">
           <button
-            aria-label="Imagen anterior"
-            title="Imagen anterior"
+            aria-label="Previous image"
+            title="Previous image"
             disabled={busy || frames.length < 2}
             onclick={() => step(-1)}>‹</button
           >
           <button
             class="play"
-            aria-label={playing ? "Pausar" : "Reproducir"}
-            title={playing ? "Pausar" : "Reproducir"}
+            aria-label={playing ? "Pause" : "Play"}
+            title={playing ? "Pause" : "Play"}
             disabled={busy || frames.length < 2}
             onclick={() => {
               playing = !playing;
@@ -1194,14 +1480,14 @@
             }}>{playing ? "Ⅱ" : "▶"}</button
           >
           <button
-            aria-label="Imagen siguiente"
-            title="Imagen siguiente"
+            aria-label="Next image"
+            title="Next image"
             disabled={busy || frames.length < 2}
             onclick={() => step(1)}>›</button
           >
         </div>
-        <label class="sr-only" for="fps">Velocidad</label>
-        <select id="fps" bind:value={fps} title="Velocidad de reproducción">
+        <label class="sr-only" for="fps">Speed</label>
+        <select id="fps" bind:value={fps} title="Playback speed">
           <option value={1}>1 fps</option><option value={2}>2 fps</option>
           <option value={4}>4 fps</option><option value={8}>8 fps</option>
         </select>
@@ -1209,7 +1495,7 @@
     </div>
   </main>
 
-  <footer>
+  <footer inert={tutorialPrompt || tutorialStep >= 0}>
     <div class="status" role="status">
       <span class="live-dot" class:loading={busy}></span>{status}
     </div>
@@ -1226,4 +1512,165 @@
       <span class="data-source">SPHEREx DR1 + QR3 · Otarios</span>
     </div>
   </footer>
+
+  {#if reportedPixel}
+    <div class="tutorial-backdrop" role="presentation">
+      <div
+        class="tutorial-prompt anomaly-report"
+        role="dialog"
+        aria-modal="true"
+      >
+        <span class="report-kicker"
+          >Citizen report · Step {anomalyQuestion} of 3</span
+        >
+        <h2>Why do you consider it an anomaly?</h2>
+        <p>
+          Pixel {reportedPixel.x + 1}, {reportedPixel.y + 1} · {observation.date.slice(
+            0,
+            10,
+          )}
+        </p>
+        {#if anomalyReportSaved}
+          <div class="report-success" role="status">
+            <strong>Report saved successfully</strong>
+            <span>Thank you for helping flag this possible change.</span>
+          </div>
+        {:else if anomalyQuestion === 1}
+          <fieldset>
+            <legend>What caught your attention?</legend
+            >{#each anomalyCategories as [value, label]}<label
+                ><input
+                  type="radio"
+                  name="category"
+                  {value}
+                  bind:group={anomalyCategory}
+                />
+                {label}</label
+              >{/each}
+          </fieldset>
+        {:else if anomalyQuestion === 2}
+          <fieldset>
+            <legend>What detail did you observe?</legend
+            >{#each anomalyDetails[anomalyCategory] as detail}<label
+                ><input
+                  type="radio"
+                  name="detail"
+                  value={detail}
+                  bind:group={anomalyDetail}
+                />
+                {detail}</label
+              >{/each}
+          </fieldset>
+        {:else}
+          <fieldset>
+            <legend>How confident are you in what you observed?</legend><label
+              ><input
+                type="radio"
+                name="confidence"
+                value="very"
+                bind:group={anomalyConfidence}
+              /> Very confident: I can clearly see the change.</label
+            ><label
+              ><input
+                type="radio"
+                name="confidence"
+                value="somewhat"
+                bind:group={anomalyConfidence}
+              /> Somewhat confident: there appears to be a change, but I have doubts.</label
+            ><label
+              ><input
+                type="radio"
+                name="confidence"
+                value="unsure"
+                bind:group={anomalyConfidence}
+              /> Unsure: I need another opinion.</label
+            >
+          </fieldset>
+        {/if}
+        <div class="tutorial-actions">
+          <button onclick={() => (reportedPixel = null)}
+            >{anomalyReportSaved ? "Done" : "Close"}</button
+          >
+          {#if !anomalyReportSaved && anomalyQuestion > 1}<button
+              onclick={() => anomalyQuestion--}>Previous</button
+            >{/if}
+          {#if !anomalyReportSaved && anomalyQuestion < 3}<button
+              class="primary"
+              disabled={(anomalyQuestion === 1 && !anomalyCategory) ||
+                (anomalyQuestion === 2 && !anomalyDetail)}
+              onclick={nextAnomalyQuestion}>Next</button
+            >{:else if !anomalyReportSaved}<button
+              class="primary"
+              disabled={!anomalyConfidence}
+              onclick={submitAnomalyReport}>Save report</button
+            >{/if}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if tutorialPrompt}
+    <div class="tutorial-backdrop" role="presentation">
+      <div
+        class="tutorial-prompt"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tutorial-title"
+      >
+        <h2 id="tutorial-title">Would you like to learn about the explorer?</h2>
+        <p>We will show you the main controls in a few short steps.</p>
+        <label class="checkbox">
+          <input
+            type="checkbox"
+            bind:checked={skipTutorialPrompt}
+            onchange={() =>
+              localStorage.setItem(
+                "skip-tutorial-prompt",
+                String(skipTutorialPrompt),
+              )}
+          />
+          Do not show again
+        </label>
+        <div class="tutorial-actions">
+          <button onclick={() => (tutorialPrompt = false)}>Close</button>
+          <button class="primary" onclick={startTutorial}>Yes, start</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if tutorialStep >= 0 && tutorialHighlight}
+    <div class="tutorial-backdrop tutorial-tour" role="presentation">
+      <div
+        class="tutorial-highlight"
+        style:left={`${tutorialHighlight.left - 8}px`}
+        style:top={`${tutorialHighlight.top - 8}px`}
+        style:width={`${tutorialHighlight.width + 16}px`}
+        style:height={`${tutorialHighlight.height + 16}px`}
+      ></div>
+      <div
+        class="tutorial-card"
+        role="dialog"
+        aria-modal="true"
+        aria-live="polite"
+        style:left={`${tutorialCardPosition.left}px`}
+        style:top={`${tutorialCardPosition.top}px`}
+      >
+        <span>Step {tutorialStep + 1} of {tutorialSteps.length}</span>
+        <h2>{tutorialSteps[tutorialStep].title}</h2>
+        <p>{tutorialSteps[tutorialStep].text}</p>
+        <div class="tutorial-actions">
+          <button onclick={closeTutorial}>Close</button>
+          <button disabled={tutorialStep === 0} onclick={previousTutorial}
+            >Previous</button
+          >
+          <button class="primary" onclick={nextTutorial}
+            >{tutorialStep === tutorialSteps.length - 1
+              ? "Finish"
+              : "Next"}</button
+          >
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>

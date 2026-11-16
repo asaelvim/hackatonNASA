@@ -9,7 +9,7 @@ function encodedPixels(values: number[]): string {
 
 async function selectReference(page: Page, value: string, viewer: 1 | 2 = 1) {
   await page
-    .getByLabel(`Referencia B del visor ${viewer}`, { exact: true })
+    .getByLabel(`Referencia del visor ${viewer}`, { exact: true })
     .selectOption(value);
 }
 
@@ -118,7 +118,7 @@ test("solicita y prepara las 60 observaciones sin limitar la serie a 12", async 
   await expect(page.locator(".image-label")).toContainText("2084-05-01");
 });
 
-test("muestra Frame B solo en el encabezado del visor que lo necesita", async ({
+test("muestra la referencia solo en el encabezado del visor que lo necesita", async ({
   page,
 }, testInfo) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -128,14 +128,45 @@ test("muestra Frame B solo en el encabezado del visor que lo necesita", async ({
   const overlay = page.locator(".secondary-pane");
   await expect(page.locator("canvas")).toHaveCount(1);
   await expect(overlay).toHaveCount(0);
-  await expect(page.getByLabel("Referencia B")).toHaveCount(0);
+  await expect(page.locator(".mode-hint")).toHaveCount(0);
+  await expect(series.locator(".dual-toggle")).toHaveAttribute(
+    "title",
+    "Abrir segundo visor para comparar",
+  );
+  await expect(
+    page.getByRole("combobox", { name: /^Referencia del visor/ }),
+  ).toHaveCount(0);
   await expect(page.locator("details[open]")).toHaveCount(0);
+  await expect(page.locator(".toolbar .dual-toggle")).toHaveCount(0);
+  const toggleBounds = await series
+    .locator(".pane-header .dual-toggle")
+    .boundingBox();
+  const headerBounds = await series.locator(".pane-header").boundingBox();
+  expect(toggleBounds!.x + toggleBounds!.width).toBeCloseTo(
+    headerBounds!.x + headerBounds!.width - 10,
+    1,
+  );
+  expect(toggleBounds!.y).toBeCloseTo(headerBounds!.y + 6, 1);
   await page.getByRole("button", { name: "Mostrar dos visores" }).click();
   await expect(
     page.getByRole("button", { name: "Mostrar un visor" }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByLabel("Visualización")).toHaveValue("image");
   await expect(page.getByLabel("Modo del visor 2")).toHaveValue("overlay");
+  await expect(page.getByLabel("Modo del visor 2")).toHaveAccessibleDescription(
+    "Combina la imagen actual en rojo y la referencia en cian.",
+  );
+  const comparisonHelp = overlay.getByLabel(
+    "Ayuda sobre comparación del visor 2",
+    {
+      exact: true,
+    },
+  );
+  await expect(overlay.locator(".mode-hint")).toBeHidden();
+  await comparisonHelp.click();
+  await expect(overlay.locator(".pane-header .mode-hint")).toBeVisible();
+  await comparisonHelp.click();
+  await expect(overlay.locator(".mode-hint")).toBeHidden();
   await expect(series.locator(".reference-controls")).toHaveCount(0);
   await expect(
     overlay.locator(".pane-header .reference-controls"),
@@ -143,16 +174,39 @@ test("muestra Frame B solo en el encabezado del visor que lo necesita", async ({
   await expect(page.locator(".toolbar .reference-controls")).toHaveCount(0);
   await expect(page.locator("canvas")).toHaveCount(2);
   await expect(overlay.locator(".overlay-date")).toContainText(
-    "A · 2025-05-01",
+    "Actual · 2025-05-01",
   );
   await expect(overlay.locator(".overlay-date")).toContainText(
-    "B · 2026-05-01",
+    "Referencia · 2026-05-01",
   );
   const seriesBounds = await series.boundingBox();
   const overlayBounds = await overlay.boundingBox();
   expect(overlayBounds!.x).toBeGreaterThanOrEqual(
     seriesBounds!.x + seriesBounds!.width,
   );
+  await page.setViewportSize({ width: 1000, height: 900 });
+  const narrowPrimaryImageBounds = await series
+    .locator(".image-viewport")
+    .boundingBox();
+  const narrowSecondaryImageBounds = await overlay
+    .locator(".image-viewport")
+    .boundingBox();
+  expect(narrowSecondaryImageBounds!.height).toBeCloseTo(
+    narrowPrimaryImageBounds!.height,
+    0,
+  );
+  await page.setViewportSize({ width: 320, height: 900 });
+  const initialPrimaryImageBounds = await series
+    .locator(".image-viewport")
+    .boundingBox();
+  const initialSecondaryImageBounds = await overlay
+    .locator(".image-viewport")
+    .boundingBox();
+  expect(initialSecondaryImageBounds!.height).toBeCloseTo(
+    initialPrimaryImageBounds!.height,
+    0,
+  );
+  await page.setViewportSize({ width: 1280, height: 720 });
   await expect(series.locator(".image-label > span:first-child")).toHaveCSS(
     "font-size",
     "24px",
@@ -172,7 +226,7 @@ test("muestra Frame B solo en el encabezado del visor que lo necesita", async ({
   await page.keyboard.press("End");
   await expect(series.locator(".image-label")).toContainText("2027-05-01");
   await expect(overlay.locator(".overlay-date")).toContainText(
-    "A · 2027-05-01",
+    "Actual · 2027-05-01",
   );
   const laterPixel = await pixels(".secondary-pane canvas");
   expect(laterPixel[0]).toBeGreaterThan(overlayPixel[0]);
@@ -182,7 +236,15 @@ test("muestra Frame B solo en el encabezado del visor que lo necesita", async ({
   expect(changedReference[0]).toBe(laterPixel[0]);
   expect(changedReference[1]).toBeLessThan(laterPixel[1]);
   await page.getByLabel("Modo del visor 2").selectOption("difference");
+  await expect(page.getByLabel("Modo del visor 2")).toHaveAccessibleDescription(
+    "Resalta lo que cambia entre la imagen actual y la referencia.",
+  );
   await expect(page.getByLabel("Visualización")).toHaveValue("image");
+  await page.getByLabel("Visualización").selectOption("anomaly");
+  await expect(series.locator(".reference-controls")).toHaveCount(0);
+  await expect(series.locator(".comparison-note")).toContainText(
+    "píxeles anómalos",
+  );
   const differencePixel = await pixels(".secondary-pane canvas");
   expect(differencePixel[0]).toBeGreaterThan(0);
   expect(differencePixel[2]).toBe(0);
@@ -192,45 +254,51 @@ test("muestra Frame B solo en el encabezado del visor que lo necesita", async ({
     series.locator(".pane-header .reference-controls"),
   ).toBeVisible();
   await expect(
-    page.getByLabel("Referencia B del visor 1", { exact: true }),
+    page.getByLabel("Referencia del visor 1", { exact: true }),
   ).toHaveValue("1");
   await expect(
-    page.getByLabel("Referencia B del visor 2", { exact: true }),
+    page.getByLabel("Referencia del visor 2", { exact: true }),
   ).toHaveValue("0");
   await page
     .getByRole("button", {
-      name: "Usar frame A como B del visor 1",
+      name: "Usar imagen actual como referencia del visor 1",
       exact: true,
     })
     .click();
   await expect(
-    page.getByLabel("Referencia B del visor 1", { exact: true }),
+    page.getByLabel("Referencia del visor 1", { exact: true }),
   ).toHaveValue("2");
   await expect(
-    page.getByLabel("Referencia B del visor 2", { exact: true }),
+    page.getByLabel("Referencia del visor 2", { exact: true }),
   ).toHaveValue("0");
   expect(await pixels(".secondary-pane canvas")).toEqual(differencePixel);
   await page.getByLabel("Visualización").selectOption("image");
   await expect(series.locator(".reference-controls")).toHaveCount(0);
+  await expect(series.locator(".mode-hint")).toHaveCount(0);
+  await expect(page.getByLabel("Visualización")).not.toHaveAttribute(
+    "aria-describedby",
+  );
   await page
     .getByRole("button", {
-      name: "Usar frame A como B del visor 2",
+      name: "Usar imagen actual como referencia del visor 2",
       exact: true,
     })
     .click();
   await expect(
-    page.getByLabel("Referencia B del visor 2", { exact: true }),
+    page.getByLabel("Referencia del visor 2", { exact: true }),
   ).toHaveValue("2");
   await expect(overlay.locator(".comparison-note")).toContainText(
-    "A y B son la misma observación",
+    "La imagen actual y la referencia son la misma observación",
   );
   await page.getByRole("button", { name: "Mostrar un visor" }).click();
   await expect(page.locator("canvas")).toHaveCount(1);
-  await expect(page.getByLabel("Referencia B")).toHaveCount(0);
+  await expect(
+    page.getByRole("combobox", { name: /^Referencia del visor/ }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "Mostrar dos visores" }).click();
   await expect(page.getByLabel("Modo del visor 2")).toHaveValue("difference");
   await expect(
-    page.getByLabel("Referencia B del visor 2", { exact: true }),
+    page.getByLabel("Referencia del visor 2", { exact: true }),
   ).toHaveValue("2");
   await selectReference(page, "0", 2);
   await page.getByRole("button", { name: "Acercar", exact: true }).click();
@@ -255,7 +323,26 @@ test("muestra Frame B solo en el encabezado del visor que lo necesita", async ({
   );
   await expect(series.locator("canvas")).toBeVisible();
   await expect(overlay.locator("canvas")).toBeVisible();
+  const primaryImageBounds = await series
+    .locator(".image-viewport")
+    .boundingBox();
+  const secondaryImageBounds = await overlay
+    .locator(".image-viewport")
+    .boundingBox();
+  expect(secondaryImageBounds!.height).toBeCloseTo(
+    primaryImageBounds!.height,
+    0,
+  );
   const mobileHeader = await overlay.locator(".pane-header").boundingBox();
+  const mobilePrimaryHeader = await series
+    .locator(".pane-header")
+    .boundingBox();
+  const mobileToggle = await series.locator(".dual-toggle").boundingBox();
+  expect(mobileToggle!.x + mobileToggle!.width).toBeCloseTo(
+    mobilePrimaryHeader!.x + mobilePrimaryHeader!.width - 10,
+    1,
+  );
+  expect(mobileToggle!.y).toBeCloseTo(mobilePrimaryHeader!.y + 6, 1);
   const mobileReference = await overlay
     .locator(".reference-select")
     .boundingBox();
@@ -264,6 +351,16 @@ test("muestra Frame B solo en el encabezado del visor que lo necesita", async ({
     mobileHeader!.y + mobileHeader!.height,
   );
   expect(mobileReference!.x + mobileReference!.width).toBeLessThanOrEqual(320);
+  expect(mobileReference!.width).toBeGreaterThanOrEqual(90);
+  const mobileReferenceAction = await overlay
+    .getByRole("button", {
+      name: "Usar imagen actual como referencia del visor 2",
+      exact: true,
+    })
+    .boundingBox();
+  expect(
+    mobileReferenceAction!.x + mobileReferenceAction!.width,
+  ).toBeLessThanOrEqual(mobileHeader!.x + mobileHeader!.width);
   await page.screenshot({
     path: testInfo.outputPath("dual-viewers-mobile.png"),
   });
@@ -422,7 +519,9 @@ test("una nueva consulta con una sola imagen sale del modo diferencia", async ({
   await expect(
     page.locator("#secondary-mode option[value='overlay']"),
   ).toBeDisabled();
-  await expect(page.getByLabel("Referencia B")).toHaveCount(0);
+  await expect(
+    page.getByRole("combobox", { name: /^Referencia del visor/ }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Reproducir", exact: true }),
   ).toBeDisabled();
@@ -451,9 +550,10 @@ test("cancelar una consulta devuelve el control sin crear una serie", async ({
   await expect(progress).toBeVisible();
   await expect(progress).not.toHaveAttribute("aria-valuenow");
   const barBounds = await progress.boundingBox();
-  const headerBounds = await page.locator(".toolbar").boundingBox();
-  expect(barBounds!.y).toBe(headerBounds!.y);
-  expect(barBounds!.width).toBe(headerBounds!.width);
+  const viewerBounds = await page.locator(".sky-view").boundingBox();
+  expect(barBounds!.y).toBeCloseTo(viewerBounds!.y + 1, 1);
+  expect(barBounds!.width).toBeCloseTo(viewerBounds!.width - 2, 1);
+  await expect(page.locator(".toolbar .loading-progress")).toHaveCount(0);
   expect(barBounds!.height).toBeLessThanOrEqual(4);
   await page.getByRole("button", { name: "Cancelar consulta" }).click();
   await expect(page.getByRole("status")).toContainText("Consulta cancelada");
@@ -477,6 +577,19 @@ test("los controles y desplegables caben en móviles estrechos", async ({
     () => document.documentElement.scrollWidth > window.innerWidth,
   );
   expect(overflows).toBe(false);
+  const instrumentBounds = await page
+    .locator(".instrument-controls")
+    .boundingBox();
+  const contrastBounds = await page.locator(".contrast-control").boundingBox();
+  const zoomBounds = await page
+    .getByRole("button", { name: "Alternar pantalla completa" })
+    .boundingBox();
+  const controlsRight = instrumentBounds!.x + instrumentBounds!.width;
+  expect(contrastBounds!.x + contrastBounds!.width).toBeCloseTo(
+    controlsRight,
+    1,
+  );
+  expect(zoomBounds!.x + zoomBounds!.width).toBeCloseTo(controlsRight, 1);
   await expect(page.locator(".timeline-strip .playback")).toBeVisible();
   await expect(page.locator(".toolbar .playback")).toHaveCount(0);
   const timelineBounds = await page.locator(".timeline-track").boundingBox();
@@ -531,6 +644,14 @@ test("el visor es la superficie principal en escritorio", async ({
   expect(layout.top).toBeLessThan(110);
   expect(layout.scrollHeight).toBeLessThanOrEqual(layout.viewportHeight);
   expect(layout.colorScheme).toBe("light");
+  const instrumentBounds = await page
+    .locator(".instrument-controls")
+    .boundingBox();
+  const zoomBounds = await page.locator(".view-tools").boundingBox();
+  expect(zoomBounds!.x + zoomBounds!.width).toBeCloseTo(
+    instrumentBounds!.x + instrumentBounds!.width,
+    1,
+  );
   await expect(page.locator(".toolbar .playback")).toHaveCount(0);
   const playback = page.locator(".timeline-strip .playback");
   await expect(
@@ -895,6 +1016,35 @@ test("un fallo de IRSA se informa sin hacer pasar la vista guardada por datos nu
     "La actualización falló",
   );
   await expect(page.locator(".series-pane canvas")).toBeVisible();
+  await page.getByRole("button", { name: "Cerrar mensaje de error" }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByTestId("saved-preview")).toBeVisible();
+  await page
+    .getByRole("button", { name: "Cerrar aviso de vista previa guardada" })
+    .click();
+  await expect(page.getByTestId("saved-preview")).toHaveCount(0);
+  await expect(page.locator(".messages")).toHaveCount(0);
+  await expect(page.locator(".series-pane canvas")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText(
+    "La actualización falló",
+  );
+  await page.getByRole("button", { name: "Explorar región" }).click();
+  await expect(page.getByRole("alert")).toContainText("IRSA no disponible.");
+  await expect(page.getByTestId("saved-preview")).toBeVisible();
+  await page.setViewportSize({ width: 320, height: 900 });
+  const errorBounds = await page.getByRole("alert").boundingBox();
+  const closeButton = page.getByRole("button", {
+    name: "Cerrar mensaje de error",
+  });
+  const closeBounds = await closeButton.boundingBox();
+  expect(closeBounds!.x + closeBounds!.width).toBeCloseTo(
+    errorBounds!.x + errorBounds!.width - 3,
+    0,
+  );
+  await closeButton.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByTestId("saved-preview")).toBeVisible();
 });
 
 test("un recorte fallido se informa como resultado parcial al terminar", async ({
