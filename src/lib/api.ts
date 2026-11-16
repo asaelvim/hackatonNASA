@@ -1,5 +1,7 @@
 import type { Query } from "./sky";
 
+const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+
 export interface Observation {
   id: string;
   source_url: string;
@@ -52,14 +54,18 @@ export type EncodedFrame = Omit<Frame, "pixels" | "flags"> & {
 
 async function json<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const body = await response.json();
+    const body = await response.json().catch(() => null);
     throw new Error(
       typeof body.detail === "string"
         ? body.detail
-        : `Invalid request (${response.status}).`,
+        : response.status === 404
+          ? "The data service is not configured for this site."
+          : `The data service returned an error (${response.status}).`,
     );
   }
-  return response.json();
+  return response.json().catch(() => {
+    throw new Error("The data service returned an invalid response.");
+  });
 }
 
 export async function search(
@@ -71,7 +77,7 @@ export async function search(
     dec: String(query.dec),
     detector: String(query.detector),
   });
-  return json(await fetch(`/api/observations?${params}`, { signal }));
+  return json(await fetch(`${apiBase}/api/observations?${params}`, { signal }));
 }
 
 export function decodeFloats(encoded: string): Float32Array {
@@ -107,7 +113,7 @@ export async function detectMovingSources(
   signal: AbortSignal,
 ): Promise<MovingSourceAnalysis> {
   const result = await json<{ masks: string[]; counts: number[] }>(
-    await fetch("/api/moving-sources", {
+    await fetch(`${apiBase}/api/moving-sources`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -143,7 +149,7 @@ export async function detectMovingSources(
 
 export async function saveAnomalyReport(report: AnomalyReport): Promise<void> {
   await json(
-    await fetch("/api/anomaly-reports", {
+    await fetch(`${apiBase}/api/anomaly-reports`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(report),
@@ -157,7 +163,7 @@ export async function loadFrame(
   signal: AbortSignal,
 ): Promise<Frame> {
   const result = await json<EncodedFrame>(
-    await fetch("/api/frame", {
+    await fetch(`${apiBase}/api/frame`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
